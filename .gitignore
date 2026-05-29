@@ -1,0 +1,10 @@
+node_modules/
+lib/
+dist/
+.env
+.DS_Store
+npm-debug.log
+data/
+.codex/
+.agents/
+scripts/

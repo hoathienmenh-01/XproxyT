@@ -1,0 +1,11 @@
+node_modules
+.git
+*.log
+data/
+dist/
+lib/
+coverage/
+.env
+.env.*
+*.md
+tests/
