@@ -3,20 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#06080d" />
-    <title>XproxyT — AI Proxy Gateway</title>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <title>Luna Proxy UI</title>
+    <link href="https://fonts.googleapis.com/css2?family=PT+Serif:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/styles.css">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
-    <script>
-      window.addEventListener('error', function (event) {
-        var root = document.getElementById('root');
-        if (!root || root.childNodes.length > 0) return;
-        root.innerHTML = '<div style="padding:40px;font-family:\'JetBrains Mono\',monospace;background:#06080d;color:#ef4444;min-height:100vh"><h1 style="font-size:1.5rem;margin-bottom:16px">XproxyT failed to load</h1><pre style="white-space:pre-wrap;color:#94a3b8;font-size:0.85rem;background:#0f1420;padding:16px;border-radius:8px;border:1px solid rgba(239,68,68,0.2)">' +
-          String(event.message || 'Unknown script error') +
-          '</pre></div>';
-      });
-    </script>
     <script type="module" crossorigin src="/assets/proxy-luna-app.js"></script>
   </head>
   <body>

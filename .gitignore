@@ -7,4 +7,5 @@ npm-debug.log
 data/
 .codex/
 .agents/
-scripts/
+scripts/*.sh
+scripts/*.ps1

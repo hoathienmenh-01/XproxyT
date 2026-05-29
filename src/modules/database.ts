@@ -5,12 +5,18 @@
  * Replaces JSON file storage with atomic, concurrent-safe SQLite + WAL mode.
  */
 
-import { DatabaseSync } from 'node:sqlite';
+// node:sqlite is available in Node 24+. Use require for ts-node compatibility.
+let DatabaseSync: any;
+try {
+  DatabaseSync = require('node:sqlite').DatabaseSync;
+} catch {
+  // Fallback: will fail at runtime if Node < 24
+}
 import * as path from 'path';
 import * as fs from 'fs';
 
 /** Database instance */
-let db: DatabaseSync | null = null;
+let db: any = null;
 
 /** Default database path */
 const DEFAULT_DB_PATH = path.join(process.cwd(), 'data', 'luna-proxy.db');
@@ -21,7 +27,7 @@ let activeDbPath: string = DEFAULT_DB_PATH;
 /**
  * Initialize the database connection and create tables.
  */
-export function initDatabase(dbPath?: string): DatabaseSync {
+export function initDatabase(dbPath?: string): any {
   const resolvedPath = dbPath || DEFAULT_DB_PATH;
   activeDbPath = resolvedPath;
   
@@ -51,7 +57,7 @@ export function initDatabase(dbPath?: string): DatabaseSync {
 /**
  * Get the current database instance.
  */
-export function getDatabase(): DatabaseSync {
+export function getDatabase(): any {
   if (!db) {
     return initDatabase();
   }
@@ -71,7 +77,7 @@ export function closeDatabase(): void {
 /**
  * Create all required tables.
  */
-function createTables(database: DatabaseSync): void {
+function createTables(database: any): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
@@ -117,12 +123,27 @@ function createTables(database: DatabaseSync): void {
     )
   `);
 
+  // API Keys table for SaaS-like authentication
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      key_hash TEXT NOT NULL UNIQUE,
+      display_suffix TEXT NOT NULL,
+      client_name TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   // Create indexes for common queries
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at)
   `);
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)
+  `);
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)
   `);
 }
 
@@ -302,6 +323,61 @@ export function getLogStats(): { total: number; byLevel: Record<string, number> 
     byLevel[row.level] = row.c;
   }
   return { total, byLevel };
+}
+
+// ===== API Key helpers =====
+
+export interface ApiKeyRow {
+  id: string;
+  key_hash: string;
+  display_suffix: string;
+  client_name: string | null;
+  is_active: number;
+  created_at: string;
+}
+
+/**
+ * Insert a new API key record.
+ */
+export function insertApiKey(id: string, keyHash: string, displaySuffix: string, clientName: string): void {
+  const database = getDatabase();
+  const stmt = database.prepare(
+    'INSERT INTO api_keys (id, key_hash, display_suffix, client_name) VALUES (?, ?, ?, ?)'
+  );
+  stmt.run(id, keyHash, displaySuffix, clientName);
+}
+
+/**
+ * Look up an API key by its hash. Returns the row if found, null otherwise.
+ */
+export function getApiKeyByHash(keyHash: string): ApiKeyRow | null {
+  const database = getDatabase();
+  const stmt = database.prepare(
+    'SELECT id, key_hash, display_suffix, client_name, is_active, created_at FROM api_keys WHERE key_hash = ?'
+  );
+  const row = stmt.get(keyHash) as ApiKeyRow | undefined;
+  return row || null;
+}
+
+/**
+ * Deactivate an API key by ID.
+ */
+export function deactivateApiKey(id: string): boolean {
+  const database = getDatabase();
+  const stmt = database.prepare('UPDATE api_keys SET is_active = 0 WHERE id = ?');
+  const result = stmt.run(id);
+  return result.changes > 0;
+}
+
+/**
+ * List all API keys.
+ */
+export function listApiKeys(): ApiKeyRow[] {
+  const database = getDatabase();
+  const stmt = database.prepare(
+    'SELECT id, key_hash, display_suffix, client_name, is_active, created_at FROM api_keys ORDER BY created_at DESC'
+  );
+  return stmt.all() as ApiKeyRow[];
 }
 
 /**

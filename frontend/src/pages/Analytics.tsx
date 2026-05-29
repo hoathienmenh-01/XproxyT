@@ -86,6 +86,7 @@ function MiniSparkline({data}: {data: number[]}) {
 function TestModelSection({models}: {models: string[]}) {
   const [testModel, setTestModel] = useState('');
   const [customModel, setCustomModel] = useState('');
+  const [customPrompt, setCustomPrompt] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<any>(null);
   const [testError, setTestError] = useState<string | null>(null);
@@ -97,10 +98,10 @@ function TestModelSection({models}: {models: string[]}) {
     setTestResult(null);
     setTestError(null);
     try {
-      const res = await fetch('/api/test-model', {
+      const res = await fetch('/api/admin/test-model', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({model}),
+        body: JSON.stringify({model, prompt: customPrompt || undefined}),
       });
       const data = await res.json();
       if (res.ok && data.ok) {
@@ -152,6 +153,40 @@ function TestModelSection({models}: {models: string[]}) {
           >
             {testing ? '⏳ Testing…' : '⚡ Run Test'}
           </button>
+        </div>
+
+        {/* Custom prompt input */}
+        <div style={{marginBottom: 'var(--sp-3)'}}>
+          <textarea
+            placeholder="Type your custom prompt here... (leave empty for default 'Hello, respond with just OK')"
+            value={customPrompt}
+            onChange={e => setCustomPrompt(e.target.value)}
+            rows={3}
+            style={{
+              width: '100%',
+              padding: '8px 12px',
+              borderRadius: 'var(--r-sm)',
+              border: '1px solid var(--border-3)',
+              background: 'var(--bg-raised)',
+              color: 'var(--text-2)',
+              fontSize: '0.82rem',
+              fontFamily: 'var(--font-mono)',
+              resize: 'vertical',
+              boxSizing: 'border-box',
+            }}
+          />
+          <div style={{display: 'flex', justifyContent: 'space-between', marginTop: 'var(--sp-1)'}}>
+            <span className="muted" style={{fontSize: '0.72rem'}}>Custom prompt sent to the model (optional)</span>
+            {customPrompt && (
+              <button
+                className="btn btn-secondary btn-sm"
+                style={{fontSize: '0.7rem', padding: '2px 8px'}}
+                onClick={() => setCustomPrompt('')}
+              >
+                Clear
+              </button>
+            )}
+          </div>
         </div>
 
         {testError && (

@@ -21,8 +21,11 @@ import {QwenAiAdapter} from '../main/proxy/adapters/qwen-ai';
 import {QwenAiAdapter as QwenAiOAuthAdapter} from '../main/oauth/adapters/qwen-ai';
 import {captureQwenAiCredentials} from '../main/oauth/qwenAiCapture';
 import {getAllPrompts, getPromptOverrides, setPromptOverride, resetPromptOverrides} from '../main/proxy/prompts/prompts';
+import * as crypto from 'crypto';
 import {compactSession} from '../modules/sessionCompactor';
 import {getWorkspaceDiagnostics, cleanupExpiredLocks} from '../modules/workspaceScheduler';
+import {insertApiKey, getApiKeyByHash, deactivateApiKey, listApiKeys} from '../modules/database';
+import {collectNonStreamFromTransformedSSE} from '../modules/sseCollector';
 import {abortRun, releaseRun} from '../runtime/scheduler';
 import {registerRunController, unregisterRunController} from '../runtime/runControllers';
 import {Account, Provider} from '../main/store/types';
@@ -253,25 +256,7 @@ export function registerRoutes(router: Router): void {
     ctx.body = {providerId: 'qwen-ai', source: 'builtin-qwen-catalog', items: getQwenAiModelCatalog(), updatedAt: null};
   });
 
-  router.get('/v1/models', async ctx => {
-    const config = configStore.getConfig();
-    const requiredProxyKey = String(config.proxy?.key || '').trim();
-    if (requiredProxyKey) {
-      const authHeader = String(ctx.headers.authorization || '');
-      const bearer = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
-      const providedKey = bearer || String(ctx.headers['x-proxy-key'] || '');
-      if (providedKey !== requiredProxyKey) {
-        ctx.status = 401;
-        ctx.body = {error: {message: 'Unauthorized: invalid proxy key'}};
-        return;
-      }
-    }
-    ctx.set('Cache-Control', 'no-store');
-    ctx.body = {
-      object: 'list',
-      data: getQwenAiModelCatalog().map(m => ({id: String(m.id || m.name || '').trim(), object: 'model', created: 0, owned_by: 'qwen-ai', name: m.name || m.id})).filter(m => !!m.id),
-    };
-  });
+  // /v1/models is registered in server.ts with requireApiKey middleware
 
   // === Logs ===
   router.get('/api/logs/stats', async ctx => { ctx.body = configStore.getLogsStats(); });
@@ -522,6 +507,148 @@ export function registerRoutes(router: Router): void {
     } catch (error) {
       appLogger.error('[Routes] Model refresh failed', {error: error instanceof Error ? error : undefined});
       ctx.status = 500; ctx.body = {ok: false, error: error instanceof Error ? error.message : String(error)};
+    }
+  });
+
+  // === Phase 27: Admin API Key Management ===
+  // These routes are under /api/admin/* and do NOT require API key middleware
+  // (they are internal dashboard management routes)
+
+  // List all API keys (without hash)
+  router.get('/api/admin/keys', async ctx => {
+    try {
+      const keys = listApiKeys();
+      ctx.body = {
+        ok: true,
+        keys: keys.map(k => ({
+          id: k.id,
+          display_suffix: k.display_suffix,
+          client_name: k.client_name,
+          is_active: k.is_active,
+          created_at: k.created_at,
+        })),
+      };
+    } catch (err) {
+      ctx.status = 500;
+      ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};
+    }
+  });
+
+  // Generate a new API key
+  router.post('/api/admin/keys', async ctx => {
+    const body = ctx.request.body as any;
+    const clientName = body?.client_name || 'default-client';
+    try {
+      const randomHex = crypto.randomBytes(32).toString('hex');
+      const rawKey = `sk-luna-${randomHex}`;
+      const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
+      const displaySuffix = rawKey.slice(-4);
+      const id = crypto.randomUUID();
+      insertApiKey(id, keyHash, displaySuffix, clientName);
+      ctx.body = {
+        ok: true,
+        rawApiKey: rawKey,
+        id,
+        client_name: clientName,
+        display_suffix: displaySuffix,
+        message: 'Copy this key now. It will NOT be shown again.',
+      };
+    } catch (err) {
+      ctx.status = 500;
+      ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};
+    }
+  });
+
+  // Toggle API key active status
+  router.patch('/api/admin/keys/:id/toggle', async ctx => {
+    const {id} = ctx.params;
+    try {
+      const db = require('../modules/database');
+      const database = db.getDatabase();
+      const stmt = database.prepare('SELECT id, is_active FROM api_keys WHERE id = ?');
+      const row = stmt.get(id) as any;
+      if (!row) {
+        ctx.status = 404;
+        ctx.body = {ok: false, error: 'API key not found'};
+        return;
+      }
+      const newActive = row.is_active === 1 ? 0 : 1;
+      const updateStmt = database.prepare('UPDATE api_keys SET is_active = ? WHERE id = ?');
+      updateStmt.run(newActive, id);
+      ctx.body = {ok: true, id, is_active: newActive};
+    } catch (err) {
+      ctx.status = 500;
+      ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};
+    }
+  });
+
+  // Admin bypass test-model (no API key required)
+  router.post('/api/admin/test-model', async ctx => {
+    const {model, prompt} = ctx.request.body as any;
+    if (!model) {
+      ctx.status = 400;
+      ctx.body = {ok: false, error: 'model is required'};
+      return;
+    }
+    const conf = configStore.getConfig();
+    const providerConf = conf.providers.find(p => p.id === 'qwen-ai');
+    const credentials = providerConf?.credentials || {};
+    if (!credentials.token && !credentials.cookies && !credentials.cookie) {
+      ctx.status = 400;
+      ctx.body = {ok: false, error: 'Provider not configured. Set token or cookies first.'};
+      return;
+    }
+    try {
+      const {QwenAiAdapter} = require('../main/proxy/adapters/qwen-ai');
+      const provider = {id: 'qwen-ai', apiEndpoint: 'https://chat.qwen.ai', chatPath: '/api/v2/chat/completions', modelMappings: (require('../main/providers/builtin/qwen-ai').getQwenAiModelMappings ? require('../main/providers/builtin/qwen-ai').getQwenAiModelMappings() : [])};
+      const account = {id: 'test', providerId: 'qwen-ai', name: 'test', credentials};
+      const adapter = new QwenAiAdapter(provider, account);
+      const startedAt = Date.now();
+      const {response, chatId} = await adapter.chatCompletion({
+        model,
+        messages: [{role: 'user', content: prompt || 'Hello, respond with just "OK" to confirm you are working.'}],
+        stream: false,
+      });
+      const nsh = new (require('../main/proxy/adapters/qwen-ai').QwenAiStreamHandler)(model);
+      const transformed = await nsh.handleStream(response.data);
+      const result = await collectNonStreamFromTransformedSSE(transformed, model);
+      const durationMs = Date.now() - startedAt;
+      const content = result?.choices?.[0]?.message?.content || '';
+      const handlerUsage = nsh.getLastUsage();
+      const collectorUsage = result?.usage || {};
+      const usage = handlerUsage || collectorUsage;
+      ctx.body = {
+        ok: true,
+        model,
+        response: content.substring(0, 200),
+        usage: {
+          prompt_tokens: usage.prompt_tokens || 0,
+          completion_tokens: usage.completion_tokens || 0,
+          total_tokens: usage.total_tokens || 0,
+        },
+        durationMs,
+        chatId,
+      };
+      configStore.addLog('info', JSON.stringify({
+        path: '/api/admin/test-model',
+        model,
+        status: 200,
+        durationMs,
+        prompt_tokens: usage.prompt_tokens || 0,
+        completion_tokens: usage.completion_tokens || 0,
+        total_tokens: usage.total_tokens || 0,
+        stream: false,
+      }));
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      ctx.status = 500;
+      ctx.body = {ok: false, error: errMsg, model};
+      configStore.addLog('error', JSON.stringify({
+        path: '/api/admin/test-model',
+        model,
+        status: 500,
+        error: errMsg,
+      }));
     }
   });
 }

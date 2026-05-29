@@ -71,7 +71,7 @@ import {
 const SENSITIVE_HEADER_RE = /(authorization|cookie|token|api-key|x-proxy-key|proxy-authorization|secret|session)/i;
 
 // Phase 11: Re-export extracted modules for backward compatibility
-export { normalizeHeaders, maskHeaders, getClientResponseHeaders, corsMiddleware } from './server/middleware';
+export { normalizeHeaders, maskHeaders, getClientResponseHeaders, corsMiddleware, requireApiKey } from './server/middleware';
 export type { ChatCompletionRequestBody, ErrorResponse, ProxyConfig, SessionHealthMetrics } from './server/types';
 
 function convertOpenAiTools(tools: any[] | undefined): any[] {
@@ -268,8 +268,8 @@ export class SimpleProxyServer {
 
     this.app.use(async (ctx, next) => {
       ctx.set('Access-Control-Allow-Origin', '*');
-      ctx.set('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-      ctx.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      ctx.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+      ctx.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, X-Proxy-Key');
       if (ctx.method === 'OPTIONS') {
         ctx.status = 204;
         return;
@@ -422,51 +422,7 @@ export class SimpleProxyServer {
       };
     });
 
-    this.router.get('/v1/models', async ctx => {
-      const config = configStore.getConfig();
-      const requiredProxyKey = String(config.proxy?.key || '').trim();
-      if (requiredProxyKey) {
-        const authHeader = String(ctx.headers.authorization || '');
-        const xProxyKey = String(ctx.headers['x-proxy-key'] || '');
-        const bearer = authHeader.toLowerCase().startsWith('bearer ')
-          ? authHeader.slice(7).trim()
-          : '';
-        const providedKey = bearer || xProxyKey;
-        if (providedKey !== requiredProxyKey) {
-          ctx.status = 401;
-          ctx.body = {error: {message: 'Unauthorized: invalid proxy key'}};
-          return;
-        }
-      }
-
-      const data = getQwenAiModelCatalog()
-        .map(model => {
-          const id = String(model.id || model.name || '').trim();
-          if (!id) {
-            return null;
-          }
-          return {
-            id,
-            object: 'model',
-            created: 0,
-            owned_by: 'qwen-ai',
-            name: model.name || id,
-          };
-        })
-        .filter((model): model is {
-          id: string;
-          object: 'model';
-          created: number;
-          owned_by: string;
-          name: string;
-        } => Boolean(model));
-
-      ctx.set('Cache-Control', 'no-store');
-      ctx.body = {
-        object: 'list',
-        data,
-      };
-    });
+    // /v1/models is registered below with requireApiKey middleware
 
     this.router.post('/api/models', async ctx => {
       ctx.status = 405;
@@ -1282,24 +1238,32 @@ export class SimpleProxyServer {
       };
     });
 
+    // Phase 26: API Key authentication for all /v1 endpoints
+    const {requireApiKey} = require('./server/middleware');
+    this.router.use('/v1/models', requireApiKey);
+    this.router.use('/v1/chat/completions', requireApiKey);
+    this.router.use('/v1/messages', requireApiKey);
+    this.router.use('/v1/messages/count_tokens', requireApiKey);
+
+    this.router.get('/v1/models', async ctx => {
+      const data = getQwenAiModelCatalog()
+        .map(m => ({
+          id: String(m.id || m.name || '').trim(),
+          object: 'model',
+          created: 0,
+          owned_by: 'qwen-ai',
+          name: m.name || m.id,
+        }))
+        .filter(m => !!m.id);
+      ctx.set('Cache-Control', 'no-store');
+      ctx.body = { object: 'list', data };
+    });
+
     this.router.post('/v1/chat/completions', async ctx => {
       const startedAt = Date.now();
       const clientRequestHeaders = maskHeaders(ctx.headers as Record<string, any>);
       const conf = configStore.getConfig();
-      const requiredProxyKey = String(conf.proxy?.key || '').trim();
-      if (requiredProxyKey) {
-        const authHeader = String(ctx.headers.authorization || '');
-        const xProxyKey = String(ctx.headers['x-proxy-key'] || '');
-        const bearer = authHeader.toLowerCase().startsWith('bearer ')
-          ? authHeader.slice(7).trim()
-          : '';
-        const providedKey = bearer || xProxyKey;
-        if (providedKey !== requiredProxyKey) {
-          ctx.status = 401;
-          ctx.body = {error: {message: 'Unauthorized: invalid proxy key'}};
-          return;
-        }
-      }
+      // Auth is handled by requireApiKey middleware — no duplicate check needed here.
 
       const body = ctx.request.body as any;
       const model = body.model || 'Qwen3';
@@ -2097,20 +2061,7 @@ export class SimpleProxyServer {
       const startedAt = Date.now();
       const clientRequestHeaders = maskHeaders(ctx.headers as Record<string, any>);
       const conf = configStore.getConfig();
-      const requiredProxyKey = String(conf.proxy?.key || '').trim();
-      if (requiredProxyKey) {
-        const authHeader = String(ctx.headers.authorization || '');
-        const xApiKey = String(ctx.headers['x-api-key'] || '');
-        const bearer = authHeader.toLowerCase().startsWith('bearer ')
-          ? authHeader.slice(7).trim()
-          : '';
-        const providedKey = bearer || xApiKey;
-        if (providedKey !== requiredProxyKey) {
-          ctx.status = 401;
-          ctx.body = { error: { message: 'Unauthorized: invalid proxy key' } };
-          return;
-        }
-      }
+      // Auth is handled by requireApiKey middleware — no duplicate check needed here.
 
       const anthropicVersion = String(ctx.headers['anthropic-version'] || '').trim();
       if (anthropicVersion && !/^\d{4}-\d{2}-\d{2}$/.test(anthropicVersion)) {

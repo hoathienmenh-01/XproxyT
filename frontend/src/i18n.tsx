@@ -18,6 +18,7 @@ const dictionaries: Record<Language, Dictionary> = {
     'nav.analytics': 'Analytics',
     'nav.logs': 'Logs',
     'nav.settings': 'Settings',
+'nav.apikeys': 'API Keys',
     'common.loading': 'Loading...',
     'common.saving': 'Saving...',
     'common.deleting': 'Deleting...',

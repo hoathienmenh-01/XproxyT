@@ -87,6 +87,7 @@ const navItems = [
   {to: '/network', labelKey: 'nav.network', icon: 'network'},
   {to: '/workspace', labelKey: 'nav.workspace', icon: 'workspace'},
   {to: '/analytics', labelKey: 'nav.analytics', icon: 'analytics'},
+  {to: '/api-keys', labelKey: 'nav.apikeys', icon: 'settings'},
   {to: '/logs', labelKey: 'nav.logs', icon: 'logs'},
   {to: '/settings', labelKey: 'nav.settings', icon: 'settings'},
 ];
