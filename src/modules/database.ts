@@ -1,16 +1,62 @@
 /**
  * Database Module — Phase 13
- * 
- * SQLite storage using Node.js built-in `node:sqlite` (Node 24+).
+ *
+ * SQLite storage supporting both Bun (bun:sqlite) and Node.js 24+ (node:sqlite).
+ * Auto-detects runtime and uses the appropriate SQLite module.
  * Replaces JSON file storage with atomic, concurrent-safe SQLite + WAL mode.
  */
 
-// node:sqlite is available in Node 24+. Use require for ts-node compatibility.
+// Runtime detection: try bun:sqlite first, then node:sqlite
 let DatabaseSync: any;
+let runtimeName: string = 'unknown';
 try {
-  DatabaseSync = require('node:sqlite').DatabaseSync;
+  // Bun runtime: bun:sqlite
+  const bunSqlite = require('bun:sqlite');
+  const BunDatabase = bunSqlite.Database;
+  if (BunDatabase) {
+    // Wrap bun:sqlite to match node:sqlite DatabaseSync interface
+    DatabaseSync = class BunDatabaseWrapper {
+      private db: any;
+      constructor(path: string) {
+        this.db = new BunDatabase(path);
+      }
+      exec(sql: string) {
+        this.db.exec(sql);
+      }
+      prepare(sql: string) {
+        const stmt = this.db.query(sql);
+        return {
+          get(...params: any[]) {
+            return stmt.get(...params) ?? null;
+          },
+          all(...params: any[]) {
+            return stmt.all(...params);
+          },
+          run(...params: any[]) {
+            const result = stmt.run(...params);
+            // bun:sqlite returns number of changes directly for run
+            if (typeof result === 'number') {
+              return { changes: result };
+            }
+            return result;
+          },
+        };
+      }
+      close() {
+        this.db.close(true);
+      }
+    };
+    runtimeName = 'bun';
+  }
 } catch {
-  // Fallback: will fail at runtime if Node < 24
+  try {
+    // Node.js 24+ runtime: node:sqlite
+    DatabaseSync = require('node:sqlite').DatabaseSync;
+    runtimeName = 'node';
+  } catch {
+    // Neither available — will fail at runtime
+    runtimeName = 'none';
+  }
 }
 import * as path from 'path';
 import * as fs from 'fs';
@@ -42,11 +88,19 @@ export function initDatabase(dbPath?: string): any {
   }
 
   db = new DatabaseSync(resolvedPath);
-  
+
   // Enable WAL mode for better concurrent access
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA synchronous = NORMAL');
   db.exec('PRAGMA foreign_keys = ON');
+
+  // Log which runtime we're using
+  try {
+    const { logger } = require('./logger');
+    logger.info(`[Database] SQLite initialized using ${runtimeName} runtime`);
+  } catch {
+    console.log(`[Database] SQLite initialized using ${runtimeName} runtime`);
+  }
   
   // Create tables
   createTables(db);

@@ -10,6 +10,7 @@
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
     "dev": "ts-node-dev --respawn --transpile-only src/dev.ts",
+    "dev:bun": "bun src/dev.ts",
     "dev:server": "ts-node-dev --transpile-only src/dev.ts",
     "dev:watch": "ts-node-dev --respawn --transpile-only src/dev.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
