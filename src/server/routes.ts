@@ -529,6 +529,11 @@ export function registerRoutes(router: Router): void {
     });
   });
 
+  // === Connection Info (for Cline, Claude Code, Cursor) ===
+  router.get('/api/connection-info', async ctx => {
+    ctx.body = configStore.getConnectionInfo();
+  });
+
   // === Misc ===
   router.post('/api/providers/:providerId/accounts/:accountId/reset-circuit', async ctx => {
     ctx.body = {ok: true, providerId: ctx.params.providerId, accountId: ctx.params.accountId};

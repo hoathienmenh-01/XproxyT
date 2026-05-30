@@ -92,6 +92,8 @@ export default function Dashboard() {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [connInfo, setConnInfo] = useState<any>(null);
+  const [publicUrl, setPublicUrl] = useState('');
   const requestInFlight = useRef(false);
 
   async function loadDashboard(initial = false) {
@@ -117,6 +119,14 @@ export default function Dashboard() {
         setHealth('offline');
         setHealthData(null);
       }
+      try {
+        const connRes = await fetch('/api/connection-info');
+        if (connRes.ok) {
+          const ci = await connRes.json();
+          setConnInfo(ci);
+          setPublicUrl(ci.baseUrl || '');
+        }
+      } catch {}
       setLastUpdated(Date.now());
     } catch {
       setHealth('offline');
@@ -307,6 +317,89 @@ export default function Dashboard() {
           </div>
         ) : null}
       </section>
+
+      {/* Connection Info */}
+      {connInfo && (
+        <section className="surface-card" aria-labelledby="conn-title">
+          <div className="surface-card-head">
+            <h3 id="conn-title">🔌 Kết nối ứng dụng</h3>
+          </div>
+          <div style={{padding: 'var(--sp-4) var(--sp-5)'}}>
+            {/* Public URL setting */}
+            <div style={{marginBottom: 'var(--sp-4)', display: 'flex', alignItems: 'center', gap: 'var(--sp-3)'}}>
+              <label style={{fontSize: '0.82rem', color: 'var(--text-3)', whiteSpace: 'nowrap'}}>Public URL:</label>
+              <input
+                type="text"
+                value={publicUrl}
+                onChange={e => setPublicUrl(e.target.value)}
+                placeholder="https://your-domain.com:8080"
+                style={{flex: 1, padding: '6px 10px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-3)', background: 'var(--bg-raised)', color: 'var(--text-2)', fontSize: '0.82rem', fontFamily: 'var(--font-mono)'}}
+              />
+              <button className="btn btn-sm btn-secondary" onClick={async () => {
+                await fetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({settings: {publicUrl}})});
+                const r = await fetch('/api/connection-info');
+                if (r.ok) setConnInfo(await r.json());
+              }}>Lưu</button>
+            </div>
+
+            <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 'var(--sp-4)'}}>
+              {/* Cline */}
+              <div style={{background: 'var(--bg-raised)', border: '1px solid var(--border-2)', borderRadius: 'var(--r-md)', padding: 'var(--sp-4)'}}>
+                <div style={{display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-3)'}}>
+                  <span style={{fontSize: '1.2rem'}}>🤖</span>
+                  <span style={{fontWeight: 700, fontSize: '0.9rem'}}>Cline (VS Code)</span>
+                </div>
+                <div style={{fontSize: '0.78rem', color: 'var(--text-3)', marginBottom: 'var(--sp-2)'}}>
+                  OpenAI Compatible → Settings → API Provider
+                </div>
+                <div style={{background: 'var(--bg-overlay)', padding: 'var(--sp-3)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-mono)', fontSize: '0.75rem', marginBottom: 'var(--sp-2)'}}>
+                  <div><span style={{color: 'var(--text-4)'}}>Base URL:</span> <span style={{color: 'var(--accent)'}}>{connInfo.baseUrl}/v1</span></div>
+                  <div><span style={{color: 'var(--text-4)'}}>API Key:</span> <span style={{color: 'var(--text-2)'}}>{connInfo.hasApiKey ? connInfo.apiKey : 'không cần (open-access)'}</span></div>
+                </div>
+                <button className="btn btn-sm btn-secondary" style={{width: '100%'}} onClick={() => navigator.clipboard.writeText(`${connInfo.baseUrl}/v1`)}>
+                  📋 Copy Base URL
+                </button>
+              </div>
+
+              {/* Claude Code */}
+              <div style={{background: 'var(--bg-raised)', border: '1px solid var(--border-2)', borderRadius: 'var(--r-md)', padding: 'var(--sp-4)'}}>
+                <div style={{display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-3)'}}>
+                  <span style={{fontSize: '1.2rem'}}>🧠</span>
+                  <span style={{fontWeight: 700, fontSize: '0.9rem'}}>Claude Code CLI</span>
+                </div>
+                <div style={{fontSize: '0.78rem', color: 'var(--text-3)', marginBottom: 'var(--sp-2)'}}>
+                  Set environment variables trước khi chạy:
+                </div>
+                <div style={{background: 'var(--bg-overlay)', padding: 'var(--sp-3)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-mono)', fontSize: '0.72rem', whiteSpace: 'pre-wrap', lineHeight: 1.6}}>
+{`export ANTHROPIC_BASE_URL=${connInfo.baseUrl}
+export ANTHROPIC_API_KEY=${connInfo.hasApiKey ? 'your-key' : 'any'}`}
+                </div>
+                <button className="btn btn-sm btn-secondary" style={{width: '100%', marginTop: 'var(--sp-2)'}} onClick={() => navigator.clipboard.writeText(`export ANTHROPIC_BASE_URL=${connInfo.baseUrl}\nexport ANTHROPIC_API_KEY=${connInfo.hasApiKey ? 'your-key' : 'any'}`)}>
+                  📋 Copy Commands
+                </button>
+              </div>
+
+              {/* Cursor */}
+              <div style={{background: 'var(--bg-raised)', border: '1px solid var(--border-2)', borderRadius: 'var(--r-md)', padding: 'var(--sp-4)'}}>
+                <div style={{display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-3)'}}>
+                  <span style={{fontSize: '1.2rem'}}>⚡</span>
+                  <span style={{fontWeight: 700, fontSize: '0.9rem'}}>Cursor</span>
+                </div>
+                <div style={{fontSize: '0.78rem', color: 'var(--text-3)', marginBottom: 'var(--sp-2)'}}>
+                  OpenAI Compatible → Settings → Models → OpenAI API Key
+                </div>
+                <div style={{background: 'var(--bg-overlay)', padding: 'var(--sp-3)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-mono)', fontSize: '0.75rem', marginBottom: 'var(--sp-2)'}}>
+                  <div><span style={{color: 'var(--text-4)'}}>Base URL:</span> <span style={{color: 'var(--accent)'}}>{connInfo.baseUrl}/v1</span></div>
+                  <div><span style={{color: 'var(--text-4)'}}>API Key:</span> <span style={{color: 'var(--text-2)'}}>{connInfo.hasApiKey ? connInfo.apiKey : 'không cần (open-access)'}</span></div>
+                </div>
+                <button className="btn btn-sm btn-secondary" style={{width: '100%'}} onClick={() => navigator.clipboard.writeText(`${connInfo.baseUrl}/v1`)}>
+                  📋 Copy Base URL
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Recent Requests */}
       <section className="surface-card" aria-labelledby="recent-title">

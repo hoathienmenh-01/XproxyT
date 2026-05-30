@@ -237,6 +237,50 @@ export class ConfigStore {
     return this.data;
   }
 
+  /**
+   * Get the public URL for this proxy instance.
+   * Uses explicit publicUrl from settings, falls back to proxy host:port.
+   */
+  getPublicUrl(): string {
+    const publicUrl = this.data.settings?.publicUrl;
+    if (publicUrl && typeof publicUrl === 'string' && publicUrl.trim()) {
+      return publicUrl.trim().replace(/\/+$/, '');
+    }
+    const host = this.data.proxy?.host || '127.0.0.1';
+    const port = this.data.proxy?.port || 8080;
+    // If bound to 0.0.0.0, suggest localhost for local access
+    const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+    return `http://${displayHost}:${port}`;
+  }
+
+  /**
+   * Get connection info for various AI coding tools.
+   */
+  getConnectionInfo(): Record<string, any> {
+    const baseUrl = this.getPublicUrl();
+    const apiKey = this.data.proxy?.key || '';
+    const models = this.data.models || [];
+    const providers = this.data.providers || [];
+    const accounts: any[] = [];
+    for (const p of providers) {
+      if (p.accounts && p.accounts.length > 0) {
+        accounts.push(...p.accounts.map(a => ({ id: a.id, name: a.name, providerId: p.id })));
+      }
+    }
+    return {
+      baseUrl,
+      apiKey: apiKey ? '***' + apiKey.slice(-4) : null,
+      hasApiKey: !!apiKey,
+      availableModels: models.map(m => m.id || m.name),
+      accounts,
+      endpoints: {
+        openai: `${baseUrl}/v1/chat/completions`,
+        anthropic: `${baseUrl}/v1/messages`,
+        models: `${baseUrl}/v1/models`,
+      },
+    };
+  }
+
   updateConfig(partial: Partial<StoredConfig>) {
     if (partial.settings && typeof partial.settings === 'object') {
       this.data.settings = {
