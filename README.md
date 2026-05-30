@@ -274,15 +274,15 @@ Luna Proxy đóng vai trò là **middleware gateway** giữa các AI coding clie
 
 | Layer | Công nghệ | Vai trò |
 |-------|-----------|---------|
-| **Backend Runtime** | Node.js 24+ | Server runtime, hỗ trợ `node:sqlite` built-in |
+| **Backend Runtime** | Node.js 24+ / Bun | Server runtime, hỗ trợ `node:sqlite` hoặc `bun:sqlite` auto-detect |
 | **Backend Framework** | Koa.js + @koa/router | HTTP server, middleware chain, routing |
 | **Ngôn ngữ** | TypeScript | Type-safe cho cả frontend và backend |
 | **Frontend** | React 18 + React Router v6 | SPA dashboard quản lý |
 | **Frontend Bundler** | Vite 5 | Dev server + production build |
-| **Dev Runtime** | ts-node-dev | Chạy TypeScript trực tiếp với auto-reload |
+| **Dev Runtime** | ts-node-dev / Bun | Chạy TypeScript trực tiếp với auto-reload |
 | **HTTP Client** | Axios | Gọi Qwen AI API upstream |
 | **SSE Parser** | eventsource-parser | Parse Server-Sent Events từ Qwen |
-| **Cơ sở dữ liệu** | SQLite (node:sqlite) | Persistent storage với WAL mode |
+| **Cơ sở dữ liệu** | SQLite (bun:sqlite / node:sqlite) | Persistent storage với WAL mode, auto-detect runtime |
 | **Fallback Storage** | JSON files | Backward compatibility |
 | **Browser Automation** | Puppeteer | OAuth credential capture |
 | **Compression** | zstd-codec | Nén/giải nén dữ liệu |
@@ -295,7 +295,7 @@ Luna Proxy đóng vai trò là **middleware gateway** giữa các AI coding clie
 
 ### Yêu cầu
 
-- **Node.js 24+** (bắt buộc cho `node:sqlite` built-in)
+- **Node.js 24+** (cho `node:sqlite` built-in) **hoặc Bun** (dùng `bun:sqlite`)
 - npm, pnpm, hoặc bun
 
 ### Bước 1: Clone & Install
@@ -335,10 +335,13 @@ curl -X POST http://localhost:8080/api/provider/token \
 ### Bước 3: Start Server
 
 ```bash
-# Development (auto-reload khi code thay đổi)
+# Development với Node.js (auto-reload khi code thay đổi)
 npm run dev
 
-# Hoặc dùng watch mode (tương tự)
+# Development với Bun (nhanh hơn)
+npm run dev:bun
+
+# Hoặc dùng watch mode
 npm run dev:watch
 
 # Chạy 1 lần (không auto-reload)
@@ -719,6 +722,7 @@ Tự động validate cấu hình khi khởi động:
 | `DELETE` | `/api/admin/keys/:id` | Xóa API key vĩnh viễn |
 | `PATCH` | `/api/admin/keys/:id/account` | Gán/thay đổi account cho key |
 | `GET` | `/api/admin/accounts` | List tất cả accounts (cho key binding) |
+| `GET` | `/api/connection-info` | Connection info cho Cline, Claude Code, Cursor |
 
 ### Account Management API
 
