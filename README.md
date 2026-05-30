@@ -37,6 +37,7 @@ Luna Proxy đóng vai trò là **middleware gateway** giữa các AI coding clie
 | **Tool Call Handling** | Parse, validate, repair tool calls từ Qwen response |
 | **Stream Processing** | Xử lý SSE stream real-time với buffering và watchdog |
 | **Multi-Provider** | Hỗ trợ nhiều provider account, load balancing |
+| **Per-Account Key Binding** | Mỗi account có API key riêng, chạy kênh riêng biệt |
 | **Dashboard UI** | Giao diện web quản lý toàn bộ proxy |
 
 ### Client nào hoạt động được?
@@ -278,7 +279,7 @@ Luna Proxy đóng vai trò là **middleware gateway** giữa các AI coding clie
 | **Ngôn ngữ** | TypeScript | Type-safe cho cả frontend và backend |
 | **Frontend** | React 18 + React Router v6 | SPA dashboard quản lý |
 | **Frontend Bundler** | Vite 5 | Dev server + production build |
-| **Dev Runtime** | Bun (chính) / ts-node-dev (phụ) | Chạy TypeScript trực tiếp |
+| **Dev Runtime** | ts-node-dev | Chạy TypeScript trực tiếp với auto-reload |
 | **HTTP Client** | Axios | Gọi Qwen AI API upstream |
 | **SSE Parser** | eventsource-parser | Parse Server-Sent Events từ Qwen |
 | **Cơ sở dữ liệu** | SQLite (node:sqlite) | Persistent storage với WAL mode |
@@ -334,14 +335,14 @@ curl -X POST http://localhost:8080/api/provider/token \
 ### Bước 3: Start Server
 
 ```bash
-# Development (dùng Bun - nhanh nhất)
-bun src/dev.ts
-
-# Hoặc dùng npm
+# Development (auto-reload khi code thay đổi)
 npm run dev
 
-# Hoặc dùng ts-node-dev (auto-reload)
+# Hoặc dùng watch mode (tương tự)
 npm run dev:watch
+
+# Chạy 1 lần (không auto-reload)
+npm run dev:server
 ```
 
 Server khởi động tại `http://localhost:8080`
@@ -575,7 +576,36 @@ Khi nhiều agent cùng làm việc trên 1 workspace:
 | **SQLite Storage** | Logs lưu trong SQLite table `logs` |
 | **Auto Cleanup** | Giới hạn 1000 log entries, tự xóa cũ |
 
-### 11. Config Validation
+### 11. Per-Account API Key Binding (Key riêng cho từng tài khoản)
+
+Mỗi tài khoản (account) có thể gán một API key riêng. Khi client sử dụng key đó, request sẽ được chuyển thẳng đến account được gán — **độc lập, không chia sẻ, không load-balancing**.
+
+**Kiến trúc:**
+
+```
+Client A (key: sk-luna-abc...)  →  Account 1 (token_A, cookies_A)  →  Qwen AI
+Client B (key: sk-luna-def...)  →  Account 2 (token_B, cookies_B)  →  Qwen AI
+Client C (không có key bound)   →  Load-balanced giữa tất cả accounts →  Qwen AI
+```
+
+**Cách hoạt động:**
+1. Tạo account mới trong Providers (mỗi account có token + cookies riêng)
+2. Tạo API key mới và gán cho account cụ thể
+3. Client dùng key đó → request tự động routing đến account được gán
+4. Middleware xác thực key → lấy `account_id` → ép buộc dùng account đó
+
+**API Flow:**
+```
+POST /api/admin/providers/qwen-ai/accounts     → Tạo account mới
+POST /api/admin/keys                            → Tạo key (account_id: "1")
+GET  /v1/chat/completions (Bearer sk-luna-xxx)  → Routing đến account "1"
+```
+
+**Dashboard:**
+- Trang **Providers**: Quản lý accounts, tạo key per account
+- Trang **API Keys**: Xem account binding, thay đổi binding, xóa key
+
+### 12. Config Validation
 
 Tự động validate cấu hình khi khởi động:
 
@@ -684,8 +714,19 @@ Tự động validate cấu hình khi khởi động:
 | Method | Path | Mô tả |
 |--------|------|-------|
 | `GET` | `/api/admin/keys` | List tất cả API keys |
-| `POST` | `/api/admin/keys` | Tạo API key mới |
+| `POST` | `/api/admin/keys` | Tạo API key mới (tùy chọn bind account) |
 | `PATCH` | `/api/admin/keys/:id/toggle` | Toggle active/inactive |
+| `DELETE` | `/api/admin/keys/:id` | Xóa API key vĩnh viễn |
+| `PATCH` | `/api/admin/keys/:id/account` | Gán/thay đổi account cho key |
+| `GET` | `/api/admin/accounts` | List tất cả accounts (cho key binding) |
+
+### Account Management API
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `POST` | `/api/admin/providers/:providerId/accounts` | Thêm account mới vào provider |
+| `PATCH` | `/api/admin/providers/:providerId/accounts/:accountId` | Cập nhật account |
+| `DELETE` | `/api/admin/providers/:providerId/accounts/:accountId` | Xóa account |
 
 ### Prompts API
 
