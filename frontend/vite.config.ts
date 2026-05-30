@@ -10,7 +10,7 @@ export default defineConfig({
     rollupOptions: {
       input: 'index.html',
       output: {
-        entryFileNames: 'assets/proxy-luna-app.js',
+        entryFileNames: 'assets/proxy-luna-app.[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
       },

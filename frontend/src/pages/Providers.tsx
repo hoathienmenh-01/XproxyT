@@ -1,8 +1,18 @@
 import React, {useEffect, useState} from 'react';
 import {useI18n} from '../i18n';
 
-type ProviderConfig = { id: string; name?: string; credentials?: Record<string,string>; oauth?: any };
+type ProviderAccountConfig = { id: string; name?: string; enabled?: boolean; credentials?: Record<string,string>; maxConcurrentRuns?: number; networkProfileId?: string; status?: string };
+type ProviderConfig = { id: string; name?: string; credentials?: Record<string,string>; oauth?: any; accounts?: ProviderAccountConfig[] };
 type ProviderStatus = 'alive' | 'warn' | 'dead';
+
+type ApiKey = {
+  id: string;
+  display_suffix: string;
+  client_name: string;
+  account_id: string | null;
+  is_active: number;
+  created_at: string;
+};
 
 const builtinProviders = [
   { id: 'qwen-ai', name: 'Qwen AI', subtitle: 'International • Alibaba Cloud', loginUrl: 'https://chat.qwen.ai', icon: '🧠' },
@@ -72,8 +82,31 @@ export default function Providers() {
   const [validationType, setValidationType] = useState<'ok'|'error'|'info'|null>(null);
   const [oauthPolling, setOauthPolling] = useState(false);
   const [providerStatus, setProviderStatus] = useState<Record<string, ProviderStatus>>({});
+  const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  const [showAccountKeyGen, setShowAccountKeyGen] = useState<string | null>(null);
+  const [accountKeyName, setAccountKeyName] = useState('');
+  const [generatingAccountKey, setGeneratingAccountKey] = useState(false);
+  const [generatedAccountKey, setGeneratedAccountKey] = useState<string | null>(null);
+  const [showAddAccount, setShowAddAccount] = useState<string | null>(null); // providerId
+  const [newAccountId, setNewAccountId] = useState('');
+  const [newAccountName, setNewAccountName] = useState('');
+  const [newAccountToken, setNewAccountToken] = useState('');
+  const [newAccountCookies, setNewAccountCookies] = useState('');
+  const [addingAccount, setAddingAccount] = useState(false);
+  const [addAccountError, setAddAccountError] = useState<string | null>(null);
+  const [deleteAccountConfirm, setDeleteAccountConfirm] = useState<{providerId: string; accountId: string} | null>(null);
 
-  useEffect(() => { loadConfig(); }, []);
+  useEffect(() => { loadConfig(); loadApiKeys(); }, []);
+
+  async function loadApiKeys() {
+    try {
+      const res = await fetch('/api/admin/keys');
+      if (res.ok) {
+        const data = await res.json();
+        setApiKeys(data.keys || []);
+      }
+    } catch {}
+  }
 
   async function loadConfig() {
     setLoading(true);
@@ -102,6 +135,92 @@ export default function Providers() {
   }
 
   const configured = providers.filter(p => p.credentials && Object.keys(p.credentials).length > 0);
+
+  // Get all accounts for a provider (including implicit "local" account from provider-level credentials)
+  function getProviderAccounts(p: ProviderConfig): ProviderAccountConfig[] {
+    if (p.accounts && p.accounts.length > 0) return p.accounts;
+    // Implicit "local" account from provider-level credentials
+    if (p.credentials && Object.keys(p.credentials).length > 0) {
+      return [{ id: p.id, name: p.name || p.id, enabled: true, credentials: p.credentials }];
+    }
+    return [];
+  }
+
+  function getKeysForAccount(accountId: string): ApiKey[] {
+    return apiKeys.filter(k => k.account_id === accountId);
+  }
+
+  function getSharedKeys(): ApiKey[] {
+    return apiKeys.filter(k => !k.account_id);
+  }
+
+  async function addAccount() {
+    if (!showAddAccount || !newAccountId.trim()) return;
+    setAddingAccount(true);
+    setAddAccountError(null);
+    try {
+      const credentials: Record<string, string> = {};
+      if (newAccountToken.trim()) credentials.token = newAccountToken.trim();
+      if (newAccountCookies.trim()) credentials.cookies = newAccountCookies.trim();
+      const res = await fetch(`/api/admin/providers/${showAddAccount}/accounts`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id: newAccountId.trim(), name: newAccountName.trim() || newAccountId.trim(), credentials}),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setShowAddAccount(null);
+        setNewAccountId('');
+        setNewAccountName('');
+        setNewAccountToken('');
+        setNewAccountCookies('');
+        loadConfig();
+      } else {
+        setAddAccountError(data.error || 'Failed to add account');
+      }
+    } catch (err) {
+      setAddAccountError(err instanceof Error ? err.message : 'Request failed');
+    } finally {
+      setAddingAccount(false);
+    }
+  }
+
+  async function deleteAccount(providerId: string, accountId: string) {
+    try {
+      const res = await fetch(`/api/admin/providers/${providerId}/accounts/${accountId}`, {method: 'DELETE'});
+      if (res.ok) {
+        setDeleteAccountConfirm(null);
+        loadConfig();
+        loadApiKeys();
+      }
+    } catch {}
+  }
+
+  // Total accounts across all providers (including implicit)
+  function getTotalAccounts(): number {
+    return configured.reduce((sum, p) => sum + getProviderAccounts(p).length, 0);
+  }
+
+  async function generateKeyForAccount(accountId: string, accountName: string) {
+    if (!accountKeyName.trim()) return;
+    setGeneratingAccountKey(true);
+    try {
+      const res = await fetch('/api/admin/keys', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({client_name: accountKeyName.trim(), account_id: accountId}),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setGeneratedAccountKey(data.rawApiKey);
+        setShowAccountKeyGen(null);
+        setAccountKeyName('');
+        loadApiKeys();
+      }
+    } catch {} finally {
+      setGeneratingAccountKey(false);
+    }
+  }
 
   function openAdd() {
     setSelected(null);
@@ -316,6 +435,283 @@ export default function Providers() {
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* Accounts & API Keys Section */}
+      {configured.length > 0 && (
+        <div className="management-panel" style={{marginTop: 'var(--sp-6)'}}>
+          <div className="management-panel-header">
+            <h3>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{opacity: 0.6}}>
+                <path d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+              </svg>
+              Accounts & API Keys
+            </h3>
+            <span className="badge badge-accent">{getTotalAccounts()} accounts</span>
+          </div>
+          <div style={{padding: 'var(--sp-4) var(--sp-5)'}}>
+            <p style={{fontSize: '0.82rem', color: 'var(--text-3)', marginBottom: 'var(--sp-4)'}}>
+              Mỗi tài khoản có thể gán API key riêng. Client dùng key nào sẽ chạy qua account đó — độc lập, không chia sẻ.
+            </p>
+            {configured.map(p => {
+              const accounts = getProviderAccounts(p);
+              return (
+                <div key={p.id} style={{marginBottom: 'var(--sp-5)'}}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 'var(--sp-3)',
+                    marginBottom: 'var(--sp-3)',
+                  }}>
+                    <ProviderIcon id={p.id} size={24} />
+                    <span style={{fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-1)'}}>
+                      {builtinProviders.find(b => b.id === p.id)?.name || p.name || p.id}
+                    </span>
+                    <span className="badge badge-accent" style={{fontSize: '0.68rem'}}>{accounts.length} account{accounts.length !== 1 ? 's' : ''}</span>
+                    {/* Add Account button for this provider */}
+                    <button
+                      className="btn btn-sm btn-secondary"
+                      onClick={(e) => { e.stopPropagation(); setShowAddAccount(p.id); setAddAccountError(null); }}
+                      style={{marginLeft: 'auto'}}
+                    >
+                      ➕ Thêm Tài Khoản
+                    </button>
+                  </div>
+
+                  {accounts.map(acc => {
+                    const isImplicitAccount = !p.accounts || p.accounts.length === 0;
+                    const boundKeys = getKeysForAccount(acc.id);
+                    return (
+                      <div key={acc.id} style={{
+                        display: 'flex', alignItems: 'flex-start', gap: 'var(--sp-4)',
+                        padding: 'var(--sp-4) var(--sp-5)',
+                        background: 'var(--bg-raised)',
+                        border: '1px solid var(--border-2)',
+                        borderRadius: 'var(--r-md)',
+                        marginBottom: 'var(--sp-3)',
+                      }}>
+                        {/* Account info */}
+                        <div style={{flex: 1, minWidth: 0}}>
+                          <div style={{display: 'flex', alignItems: 'center', gap: 'var(--sp-3)', marginBottom: 'var(--sp-2)'}}>
+                            <span style={{
+                              fontFamily: 'var(--font-mono)', fontSize: '0.82rem',
+                              fontWeight: 600, color: 'var(--text-1)',
+                            }}>
+                              {acc.name || acc.id}
+                            </span>
+                            <span className={`status-pill status-${acc.enabled !== false ? 'alive' : 'dead'}`} style={{fontSize: '0.68rem'}}>
+                              {acc.enabled !== false ? 'Enabled' : 'Disabled'}
+                            </span>
+                          </div>
+                          <div style={{fontSize: '0.72rem', color: 'var(--text-4)', fontFamily: 'var(--font-mono)', marginBottom: 'var(--sp-2)'}}>
+                            ID: {acc.id}
+                          </div>
+
+                          {/* Keys for this account */}
+                          {boundKeys.length > 0 ? (
+                            <div style={{display: 'flex', flexWrap: 'wrap', gap: 'var(--sp-2)', marginTop: 'var(--sp-2)'}}>
+                              {boundKeys.map(k => (
+                                <div key={k.id} style={{
+                                  display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-2)',
+                                  padding: '3px 10px',
+                                  background: k.is_active === 1 ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                                  border: `1px solid ${k.is_active === 1 ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                                  borderRadius: 'var(--r-full)',
+                                  fontSize: '0.72rem',
+                                  fontFamily: 'var(--font-mono)',
+                                }}>
+                                  <span style={{color: k.is_active === 1 ? 'var(--ok)' : 'var(--danger)'}}>
+                                    {k.is_active === 1 ? '🔑' : '🚫'}
+                                  </span>
+                                  <span style={{color: 'var(--text-2)'}}>
+                                    sk-luna-...{k.display_suffix}
+                                  </span>
+                                  <span style={{color: 'var(--text-4)', fontSize: '0.68rem'}}>
+                                    ({k.client_name || 'unnamed'})
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div style={{fontSize: '0.75rem', color: 'var(--text-5)', marginTop: 'var(--sp-1)'}}>
+                              Chưa có key nào — nhấn nút bên phải để tạo
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Action buttons */}
+                        <div style={{flexShrink: 0, display: 'flex', gap: 'var(--sp-2)', flexDirection: 'column'}}>
+                          <button
+                            className="btn btn-sm btn-primary"
+                            onClick={() => setShowAccountKeyGen(acc.id)}
+                            style={{whiteSpace: 'nowrap'}}
+                          >
+                            🔑 Tạo Key
+                          </button>
+                          {!isImplicitAccount && (
+                            <button
+                              className="btn btn-sm"
+                              style={{background: 'rgba(239,68,68,0.1)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.3)', whiteSpace: 'nowrap'}}
+                              onClick={() => setDeleteAccountConfirm({providerId: p.id, accountId: acc.id})}
+                            >
+                              🗑️ Xóa
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+
+            {/* Shared keys (not bound to any account) */}
+            {getSharedKeys().length > 0 && (
+              <div style={{
+                marginTop: 'var(--sp-3)',
+                padding: 'var(--sp-4) var(--sp-5)',
+                background: 'var(--bg-raised)',
+                border: '1px dashed var(--border-3)',
+                borderRadius: 'var(--r-md)',
+              }}>
+                <div style={{fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-2)', marginBottom: 'var(--sp-2)'}}>
+                  🔓 Shared Keys (load-balanced across all accounts)
+                </div>
+                <div style={{display: 'flex', flexWrap: 'wrap', gap: 'var(--sp-2)'}}>
+                  {getSharedKeys().map(k => (
+                    <div key={k.id} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-2)',
+                      padding: '3px 10px',
+                      background: 'rgba(99,102,241,0.1)',
+                      border: '1px solid rgba(99,102,241,0.3)',
+                      borderRadius: 'var(--r-full)',
+                      fontSize: '0.72rem',
+                      fontFamily: 'var(--font-mono)',
+                    }}>
+                      <span style={{color: 'var(--accent)'}}>🔑</span>
+                      <span style={{color: 'var(--text-2)'}}>sk-luna-...{k.display_suffix}</span>
+                      <span style={{color: 'var(--text-4)', fontSize: '0.68rem'}}>({k.client_name || 'unnamed'})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Generate Key for Account Modal */}
+      {showAccountKeyGen && (
+        <div style={{position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000}} onClick={() => setShowAccountKeyGen(null)}>
+          <div style={{background: 'var(--bg-1)', border: '1px solid var(--border-2)', borderRadius: 'var(--r-lg)', padding: 'var(--sp-6)', maxWidth: 450, width: '90%'}} onClick={e => e.stopPropagation()}>
+            <h3 style={{marginBottom: 'var(--sp-4)'}}>🔑 Tạo Key cho Account</h3>
+            <div style={{
+              padding: 'var(--sp-3)', background: 'var(--bg-raised)',
+              borderRadius: 'var(--r-sm)', marginBottom: 'var(--sp-4)',
+              fontFamily: 'var(--font-mono)', fontSize: '0.82rem',
+              border: '1px solid var(--border-2)',
+            }}>
+              <span style={{color: 'var(--text-4)'}}>Account: </span>
+              <span style={{color: 'var(--accent)'}}>{showAccountKeyGen}</span>
+            </div>
+            <div style={{marginBottom: 'var(--sp-4)'}}>
+              <label style={{display: 'block', fontSize: '0.85rem', color: 'var(--text-3)', marginBottom: 'var(--sp-2)'}}>
+                Tên client (mô tả)
+              </label>
+              <input
+                type="text"
+                value={accountKeyName}
+                onChange={e => setAccountKeyName(e.target.value)}
+                placeholder="e.g. my-app, claude-code-1..."
+                style={{width: '100%', padding: '8px 12px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-3)', background: 'var(--bg-raised)', color: 'var(--text-2)', fontSize: '0.85rem'}}
+                onKeyDown={e => e.key === 'Enter' && generateKeyForAccount(showAccountKeyGen, showAccountKeyGen)}
+              />
+            </div>
+            <div style={{display: 'flex', gap: 'var(--sp-3)', justifyContent: 'flex-end'}}>
+              <button className="btn btn-secondary btn-sm" onClick={() => setShowAccountKeyGen(null)}>Hủy</button>
+              <button className="btn btn-primary btn-sm" onClick={() => generateKeyForAccount(showAccountKeyGen, showAccountKeyGen)} disabled={generatingAccountKey || !accountKeyName.trim()}>
+                {generatingAccountKey ? 'Đang tạo...' : 'Tạo Key'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Generated Account Key Modal */}
+      {generatedAccountKey && (
+        <div style={{position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000}} onClick={() => setGeneratedAccountKey(null)}>
+          <div style={{background: 'var(--bg-1)', border: '1px solid var(--border-2)', borderRadius: 'var(--r-lg)', padding: 'var(--sp-6)', maxWidth: 600, width: '90%'}} onClick={e => e.stopPropagation()}>
+            <h3 style={{color: 'var(--ok)', marginBottom: 'var(--sp-4)'}}>✅ Key đã tạo thành công!</h3>
+            <div style={{background: 'var(--bg-raised)', padding: 'var(--sp-4)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-mono)', fontSize: '0.85rem', wordBreak: 'break-all', color: 'var(--text-1)', marginBottom: 'var(--sp-4)'}}>
+              {generatedAccountKey}
+            </div>
+            <div style={{background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 'var(--r-sm)', padding: 'var(--sp-3)', marginBottom: 'var(--sp-4)'}}>
+              <p style={{color: 'var(--danger)', fontSize: '0.85rem', fontWeight: 600, margin: 0}}>
+                ⚠️ Copy key này ngay! Sẽ không hiển thị lại.
+              </p>
+            </div>
+            <div style={{display: 'flex', gap: 'var(--sp-3)', justifyContent: 'flex-end'}}>
+              <button className="btn btn-secondary btn-sm" onClick={() => navigator.clipboard.writeText(generatedAccountKey)}>
+                📋 Copy
+              </button>
+              <button className="btn btn-primary btn-sm" onClick={() => setGeneratedAccountKey(null)}>
+                Đã hiểu
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Account Modal */}
+      {showAddAccount && (
+        <div style={{position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000}} onClick={() => setShowAddAccount(null)}>
+          <div style={{background: 'var(--bg-1)', border: '1px solid var(--border-2)', borderRadius: 'var(--r-lg)', padding: 'var(--sp-6)', maxWidth: 500, width: '90%'}} onClick={e => e.stopPropagation()}>
+            <h3 style={{marginBottom: 'var(--sp-4)'}}>➕ Thêm Tài Khoản Mới</h3>
+            <div style={{padding: 'var(--sp-3)', background: 'var(--bg-raised)', borderRadius: 'var(--r-sm)', marginBottom: 'var(--sp-4)', fontFamily: 'var(--font-mono)', fontSize: '0.82rem', border: '1px solid var(--border-2)'}}>
+              <span style={{color: 'var(--text-4)'}}>Provider: </span>
+              <span style={{color: 'var(--accent)'}}>{showAddAccount}</span>
+            </div>
+            <div style={{marginBottom: 'var(--sp-4)'}}>
+              <label style={{display: 'block', fontSize: '0.85rem', color: 'var(--text-3)', marginBottom: 'var(--sp-2)'}}>ID tài khoản (duy nhất)</label>
+              <input type="text" value={newAccountId} onChange={e => setNewAccountId(e.target.value)} placeholder="e.g. account-2, my-qwen-account..." style={{width: '100%', padding: '8px 12px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-3)', background: 'var(--bg-raised)', color: 'var(--text-2)', fontSize: '0.85rem', fontFamily: 'var(--font-mono)'}} />
+            </div>
+            <div style={{marginBottom: 'var(--sp-4)'}}>
+              <label style={{display: 'block', fontSize: '0.85rem', color: 'var(--text-3)', marginBottom: 'var(--sp-2)'}}>Tên hiển thị</label>
+              <input type="text" value={newAccountName} onChange={e => setNewAccountName(e.target.value)} placeholder="e.g. Qwen Account #2..." style={{width: '100%', padding: '8px 12px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-3)', background: 'var(--bg-raised)', color: 'var(--text-2)', fontSize: '0.85rem'}} />
+            </div>
+            <div style={{marginBottom: 'var(--sp-4)'}}>
+              <label style={{display: 'block', fontSize: '0.85rem', color: 'var(--text-3)', marginBottom: 'var(--sp-2)'}}>Token</label>
+              <input type="text" value={newAccountToken} onChange={e => setNewAccountToken(e.target.value)} placeholder="tongyi_sso_ticket_xxx..." style={{width: '100%', padding: '8px 12px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-3)', background: 'var(--bg-raised)', color: 'var(--text-2)', fontSize: '0.85rem', fontFamily: 'var(--font-mono)'}} />
+            </div>
+            <div style={{marginBottom: 'var(--sp-4)'}}>
+              <label style={{display: 'block', fontSize: '0.85rem', color: 'var(--text-3)', marginBottom: 'var(--sp-2)'}}>Cookies</label>
+              <textarea value={newAccountCookies} onChange={e => setNewAccountCookies(e.target.value)} placeholder="cna=xxx; token=xxx; xlly_s=xxx..." style={{width: '100%', padding: '8px 12px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-3)', background: 'var(--bg-raised)', color: 'var(--text-2)', fontSize: '0.82rem', fontFamily: 'var(--font-mono)', minHeight: 70, resize: 'vertical'}} />
+            </div>
+            {addAccountError && (
+              <div style={{background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 'var(--r-sm)', padding: 'var(--sp-3)', marginBottom: 'var(--sp-4)', color: 'var(--danger)', fontSize: '0.82rem'}}>{addAccountError}</div>
+            )}
+            <div style={{display: 'flex', gap: 'var(--sp-3)', justifyContent: 'flex-end'}}>
+              <button className="btn btn-secondary btn-sm" onClick={() => setShowAddAccount(null)}>Hủy</button>
+              <button className="btn btn-primary btn-sm" onClick={addAccount} disabled={addingAccount || !newAccountId.trim()}>
+                {addingAccount ? 'Đang thêm...' : '➕ Thêm Tài Khoản'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Account Confirmation */}
+      {deleteAccountConfirm && (
+        <div style={{position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000}} onClick={() => setDeleteAccountConfirm(null)}>
+          <div style={{background: 'var(--bg-1)', border: '1px solid var(--border-2)', borderRadius: 'var(--r-lg)', padding: 'var(--sp-6)', maxWidth: 400, width: '90%'}} onClick={e => e.stopPropagation()}>
+            <h3 style={{color: 'var(--danger)', marginBottom: 'var(--sp-4)'}}>⚠️ Xóa Tài Khoản</h3>
+            <p style={{fontSize: '0.85rem', color: 'var(--text-2)', marginBottom: 'var(--sp-4)'}}>
+              Bạn có chắc muốn xóa tài khoản <code>{deleteAccountConfirm.accountId}</code>? Các API key gán cho account này sẽ trở thành "shared".
+            </p>
+            <div style={{display: 'flex', gap: 'var(--sp-3)', justifyContent: 'flex-end'}}>
+              <button className="btn btn-secondary btn-sm" onClick={() => setDeleteAccountConfirm(null)}>Hủy</button>
+              <button className="btn btn-danger btn-sm" onClick={() => deleteAccount(deleteAccountConfirm.providerId, deleteAccountConfirm.accountId)}>Xóa</button>
+            </div>
           </div>
         </div>
       )}

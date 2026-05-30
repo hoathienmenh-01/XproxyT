@@ -109,6 +109,10 @@ export async function requireApiKey(ctx: Koa.Context, next: () => Promise<void>)
         }
         (ctx.state as any).clientName = apiKeyRow.client_name || 'unknown';
         (ctx.state as any).apiKeyId = apiKeyRow.id;
+        // Per-account key binding: store the bound account_id for the chat endpoint
+        if (apiKeyRow.account_id) {
+          (ctx.state as any).boundAccountId = apiKeyRow.account_id;
+        }
         await next();
         return;
       }

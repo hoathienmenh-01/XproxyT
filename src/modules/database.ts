@@ -130,10 +130,16 @@ function createTables(database: any): void {
       key_hash TEXT NOT NULL UNIQUE,
       display_suffix TEXT NOT NULL,
       client_name TEXT,
+      account_id TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migration: add account_id column if missing (for existing DBs)
+  try {
+    database.exec('ALTER TABLE api_keys ADD COLUMN account_id TEXT');
+  } catch { /* column already exists */ }
 
   // Create indexes for common queries
   database.exec(`
@@ -332,6 +338,7 @@ export interface ApiKeyRow {
   key_hash: string;
   display_suffix: string;
   client_name: string | null;
+  account_id: string | null;
   is_active: number;
   created_at: string;
 }
@@ -339,12 +346,12 @@ export interface ApiKeyRow {
 /**
  * Insert a new API key record.
  */
-export function insertApiKey(id: string, keyHash: string, displaySuffix: string, clientName: string): void {
+export function insertApiKey(id: string, keyHash: string, displaySuffix: string, clientName: string, accountId?: string): void {
   const database = getDatabase();
   const stmt = database.prepare(
-    'INSERT INTO api_keys (id, key_hash, display_suffix, client_name) VALUES (?, ?, ?, ?)'
+    'INSERT INTO api_keys (id, key_hash, display_suffix, client_name, account_id) VALUES (?, ?, ?, ?, ?)'
   );
-  stmt.run(id, keyHash, displaySuffix, clientName);
+  stmt.run(id, keyHash, displaySuffix, clientName, accountId || null);
 }
 
 /**
@@ -353,7 +360,7 @@ export function insertApiKey(id: string, keyHash: string, displaySuffix: string,
 export function getApiKeyByHash(keyHash: string): ApiKeyRow | null {
   const database = getDatabase();
   const stmt = database.prepare(
-    'SELECT id, key_hash, display_suffix, client_name, is_active, created_at FROM api_keys WHERE key_hash = ?'
+    'SELECT id, key_hash, display_suffix, client_name, account_id, is_active, created_at FROM api_keys WHERE key_hash = ?'
   );
   const row = stmt.get(keyHash) as ApiKeyRow | undefined;
   return row || null;
@@ -375,9 +382,41 @@ export function deactivateApiKey(id: string): boolean {
 export function listApiKeys(): ApiKeyRow[] {
   const database = getDatabase();
   const stmt = database.prepare(
-    'SELECT id, key_hash, display_suffix, client_name, is_active, created_at FROM api_keys ORDER BY created_at DESC'
+    'SELECT id, key_hash, display_suffix, client_name, account_id, is_active, created_at FROM api_keys ORDER BY created_at DESC'
   );
   return stmt.all() as ApiKeyRow[];
+}
+
+/**
+ * Delete an API key by ID.
+ */
+export function deleteApiKey(id: string): boolean {
+  const database = getDatabase();
+  const stmt = database.prepare('DELETE FROM api_keys WHERE id = ?');
+  const result = stmt.run(id);
+  return result.changes > 0;
+}
+
+/**
+ * Get an API key by ID.
+ */
+export function getApiKeyById(id: string): ApiKeyRow | null {
+  const database = getDatabase();
+  const stmt = database.prepare(
+    'SELECT id, key_hash, display_suffix, client_name, account_id, is_active, created_at FROM api_keys WHERE id = ?'
+  );
+  const row = stmt.get(id) as ApiKeyRow | undefined;
+  return row || null;
+}
+
+/**
+ * Update the account_id binding for an API key.
+ */
+export function updateKeyAccountBinding(id: string, accountId: string | null): boolean {
+  const database = getDatabase();
+  const stmt = database.prepare('UPDATE api_keys SET account_id = ? WHERE id = ?');
+  const result = stmt.run(accountId, id);
+  return result.changes > 0;
 }
 
 /**

@@ -25,7 +25,7 @@ import {getAllPrompts, getPromptOverrides, setPromptOverride, resetPromptOverrid
 import * as crypto from 'crypto';
 import {compactSession} from '../modules/sessionCompactor';
 import {getWorkspaceDiagnostics, cleanupExpiredLocks} from '../modules/workspaceScheduler';
-import {insertApiKey, getApiKeyByHash, deactivateApiKey, listApiKeys} from '../modules/database';
+import {insertApiKey, getApiKeyByHash, deactivateApiKey, listApiKeys, deleteApiKey, getApiKeyById, updateKeyAccountBinding} from '../modules/database';
 import {collectNonStreamFromTransformedSSE} from '../modules/sseCollector';
 import {abortRun, releaseRun} from '../runtime/scheduler';
 import {registerRunController, unregisterRunController} from '../runtime/runControllers';
@@ -560,6 +560,7 @@ export function registerRoutes(router: Router): void {
           id: k.id,
           display_suffix: k.display_suffix,
           client_name: k.client_name,
+          account_id: k.account_id,
           is_active: k.is_active,
           created_at: k.created_at,
         })),
@@ -570,22 +571,24 @@ export function registerRoutes(router: Router): void {
     }
   });
 
-  // Generate a new API key
+  // Generate a new API key (with optional account binding)
   router.post('/api/admin/keys', async ctx => {
     const body = ctx.request.body as any;
     const clientName = body?.client_name || 'default-client';
+    const accountId = body?.account_id || null;
     try {
       const randomHex = crypto.randomBytes(32).toString('hex');
       const rawKey = `sk-luna-${randomHex}`;
       const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
       const displaySuffix = rawKey.slice(-4);
       const id = crypto.randomUUID();
-      insertApiKey(id, keyHash, displaySuffix, clientName);
+      insertApiKey(id, keyHash, displaySuffix, clientName, accountId);
       ctx.body = {
         ok: true,
         rawApiKey: rawKey,
         id,
         client_name: clientName,
+        account_id: accountId,
         display_suffix: displaySuffix,
         message: 'Copy this key now. It will NOT be shown again.',
       };
@@ -612,6 +615,128 @@ export function registerRoutes(router: Router): void {
       const updateStmt = database.prepare('UPDATE api_keys SET is_active = ? WHERE id = ?');
       updateStmt.run(newActive, id);
       ctx.body = {ok: true, id, is_active: newActive};
+    } catch (err) {
+      ctx.status = 500;
+      ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};
+    }
+  });
+
+  // Delete an API key permanently
+  router.delete('/api/admin/keys/:id', async ctx => {
+    const {id} = ctx.params;
+    try {
+      const ok = deleteApiKey(id);
+      ctx.status = ok ? 200 : 404;
+      ctx.body = {ok};
+    } catch (err) {
+      ctx.status = 500;
+      ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};
+    }
+  });
+
+  // Update account binding for an API key
+  router.patch('/api/admin/keys/:id/account', async ctx => {
+    const {id} = ctx.params;
+    const body = ctx.request.body as any;
+    const accountId = body?.account_id || null;
+    try {
+      const key = getApiKeyById(id);
+      if (!key) {
+        ctx.status = 404;
+        ctx.body = {ok: false, error: 'API key not found'};
+        return;
+      }
+      const ok = updateKeyAccountBinding(id, accountId);
+      ctx.body = {ok, id, account_id: accountId};
+    } catch (err) {
+      ctx.status = 500;
+      ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};
+    }
+  });
+
+  // List available accounts for key binding
+  router.get('/api/admin/accounts', async ctx => {
+    try {
+      const conf = configStore.getConfig();
+      const accounts: any[] = [];
+      for (const provider of conf.providers || []) {
+        // Explicit accounts
+        const providerAccounts = (provider.accounts || []).map(a => ({
+          id: a.id,
+          name: a.name || a.id,
+          providerId: provider.id,
+          enabled: a.enabled !== false,
+        }));
+        if (providerAccounts.length > 0) {
+          accounts.push(...providerAccounts);
+        } else if (provider.credentials && Object.keys(provider.credentials).length > 0) {
+          // Implicit "local" account
+          accounts.push({
+            id: provider.id,
+            name: provider.name || provider.id,
+            providerId: provider.id,
+            enabled: true,
+          });
+        }
+      }
+      ctx.body = {ok: true, accounts};
+    } catch (err) {
+      ctx.status = 500;
+      ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};
+    }
+  });
+
+  // Add a new account to a provider
+  router.post('/api/admin/providers/:providerId/accounts', async ctx => {
+    const {providerId} = ctx.params;
+    const body = ctx.request.body as any;
+    const accountId = body?.id;
+    const accountName = body?.name;
+    const credentials = body?.credentials || {};
+    if (!accountId) {
+      ctx.status = 400;
+      ctx.body = {ok: false, error: 'Account ID is required'};
+      return;
+    }
+    try {
+      const result = configStore.addProviderAccount(providerId, accountId, accountName || accountId, credentials);
+      if (!result) {
+        ctx.status = 409;
+        ctx.body = {ok: false, error: 'Account ID already exists or provider not found'};
+        return;
+      }
+      ctx.body = {ok: true, account: result};
+    } catch (err) {
+      ctx.status = 500;
+      ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};
+    }
+  });
+
+  // Update an account
+  router.patch('/api/admin/providers/:providerId/accounts/:accountId', async ctx => {
+    const {providerId, accountId} = ctx.params;
+    const body = ctx.request.body as any;
+    try {
+      const result = configStore.updateProviderAccount(providerId, accountId, body || {});
+      if (!result) {
+        ctx.status = 404;
+        ctx.body = {ok: false, error: 'Account not found'};
+        return;
+      }
+      ctx.body = {ok: true, account: result};
+    } catch (err) {
+      ctx.status = 500;
+      ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};
+    }
+  });
+
+  // Delete an account
+  router.delete('/api/admin/providers/:providerId/accounts/:accountId', async ctx => {
+    const {providerId, accountId} = ctx.params;
+    try {
+      const ok = configStore.deleteProviderAccount(providerId, accountId);
+      ctx.status = ok ? 200 : 404;
+      ctx.body = {ok};
     } catch (err) {
       ctx.status = 500;
       ctx.body = {ok: false, error: err instanceof Error ? err.message : String(err)};

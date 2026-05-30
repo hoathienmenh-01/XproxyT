@@ -323,6 +323,58 @@ export class ConfigStore {
     this.save();
   }
 
+  /**
+   * Add a new account to a provider.
+   * If provider has no accounts[] yet, migrate existing credentials to an implicit "local" account first.
+   */
+  addProviderAccount(providerId: string, accountId: string, accountName: string, credentials: Record<string, string>) {
+    const p = this.data.providers.find(x => x.id === providerId);
+    if (!p) return null;
+    // Migrate: if no explicit accounts yet but has provider-level credentials, create implicit "local" account
+    if (!p.accounts || p.accounts.length === 0) {
+      const existingCreds = p.credentials || {};
+      if (Object.keys(existingCreds).length > 0) {
+        p.accounts = [{ id: providerId, name: p.name || providerId, enabled: true, credentials: existingCreds }];
+      } else {
+        p.accounts = [];
+      }
+    }
+    // Check duplicate
+    if (p.accounts.some(a => a.id === accountId)) return null;
+    const newAccount = { id: accountId, name: accountName, enabled: true, credentials };
+    p.accounts.push(newAccount);
+    this.save();
+    return newAccount;
+  }
+
+  /**
+   * Delete an account from a provider.
+   */
+  deleteProviderAccount(providerId: string, accountId: string): boolean {
+    const p = this.data.providers.find(x => x.id === providerId);
+    if (!p || !p.accounts) return false;
+    const idx = p.accounts.findIndex(a => a.id === accountId);
+    if (idx < 0) return false;
+    p.accounts.splice(idx, 1);
+    this.save();
+    return true;
+  }
+
+  /**
+   * Update an account's credentials or properties.
+   */
+  updateProviderAccount(providerId: string, accountId: string, updates: { name?: string; credentials?: Record<string, string>; enabled?: boolean }) {
+    const p = this.data.providers.find(x => x.id === providerId);
+    if (!p || !p.accounts) return null;
+    const acc = p.accounts.find(a => a.id === accountId);
+    if (!acc) return null;
+    if (updates.name !== undefined) acc.name = updates.name;
+    if (updates.credentials !== undefined) acc.credentials = updates.credentials;
+    if (updates.enabled !== undefined) acc.enabled = updates.enabled;
+    this.save();
+    return acc;
+  }
+
   setProviderOAuthConfig(providerId: string, oauthConfig: any) {
     const p = this.data.providers.find(x => x.id === providerId);
     if (!p) {

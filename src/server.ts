@@ -1346,13 +1346,29 @@ export class SimpleProxyServer {
         return;
       }
 
-      const preferredAccountId = body.account || body.metadata?.account_id || ctx.headers['x-luna-account-id'] as string;
-      const account = selectAccount(providerId, accounts, preferredAccountId, (accId) => lockManager.currentCapacity(`account:${providerId}:${accId}`));
-      if (!account) {
-        ctx.status = 400;
-        ctx.body = { error: { message: `No enabled account available for provider "${providerId}"` } };
-        configStore.addLog('error', JSON.stringify({ path: '/v1/chat/completions', status: ctx.status, model, stream: !!body.stream, requestHeaders: {client: clientRequestHeaders}, responseHeaders: {client: getClientResponseHeaders(ctx)}, error: 'No enabled account', durationMs: Date.now() - startedAt }));
-        return;
+      // Per-account key binding: if the API key is bound to a specific account, force that account
+      const boundAccountId = (ctx.state as any).boundAccountId;
+      const preferredAccountId = boundAccountId || body.account || body.metadata?.account_id || ctx.headers['x-luna-account-id'] as string;
+
+      let account;
+      if (boundAccountId) {
+        // Key is bound to a specific account — find it directly (no load-balancing)
+        account = accounts.find(a => a.id === boundAccountId && a.enabled !== false);
+        if (!account) {
+          ctx.status = 403;
+          ctx.body = { error: { message: `API key is bound to account "${boundAccountId}" which is not available or not enabled` } };
+          configStore.addLog('error', JSON.stringify({ path: '/v1/chat/completions', status: 403, model, stream: !!body.stream, error: `Bound account "${boundAccountId}" not available`, durationMs: Date.now() - startedAt }));
+          return;
+        }
+        appLogger.info('[Server] Using key-bound account', { data: { accountId: boundAccountId, model } });
+      } else {
+        account = selectAccount(providerId, accounts, preferredAccountId, (accId) => lockManager.currentCapacity(`account:${providerId}:${accId}`));
+        if (!account) {
+          ctx.status = 400;
+          ctx.body = { error: { message: `No enabled account available for provider "${providerId}"` } };
+          configStore.addLog('error', JSON.stringify({ path: '/v1/chat/completions', status: ctx.status, model, stream: !!body.stream, requestHeaders: {client: clientRequestHeaders}, responseHeaders: {client: getClientResponseHeaders(ctx)}, error: 'No enabled account', durationMs: Date.now() - startedAt }));
+          return;
+        }
       }
 
       // Phase 7: Rate limiting — configurable via proxyMechanisms settings
@@ -2213,12 +2229,25 @@ export class SimpleProxyServer {
           return;
         }
 
-        const preferredAccountId = body.account || body.metadata?.account_id || ctx.headers['x-luna-account-id'] as string;
-        const account = selectAccount(providerId, accounts, preferredAccountId, (accId) => lockManager.currentCapacity(`account:${providerId}:${accId}`));
-        if (!account) {
-          ctx.status = 400;
-          ctx.body = { error: { message: `No enabled account available for provider "${providerId}"` } };
-          return;
+        // Per-account key binding for Anthropic endpoint
+        const anthropicBoundAccountId = (ctx.state as any).boundAccountId;
+        const preferredAccountId = anthropicBoundAccountId || body.account || body.metadata?.account_id || ctx.headers['x-luna-account-id'] as string;
+
+        let account;
+        if (anthropicBoundAccountId) {
+          account = accounts.find(a => a.id === anthropicBoundAccountId && a.enabled !== false);
+          if (!account) {
+            ctx.status = 403;
+            ctx.body = { error: { message: `API key is bound to account "${anthropicBoundAccountId}" which is not available or not enabled` } };
+            return;
+          }
+        } else {
+          account = selectAccount(providerId, accounts, preferredAccountId, (accId) => lockManager.currentCapacity(`account:${providerId}:${accId}`));
+          if (!account) {
+            ctx.status = 400;
+            ctx.body = { error: { message: `No enabled account available for provider "${providerId}"` } };
+            return;
+          }
         }
 
         const token = (account.credentials.token) || process.env.QWEN_AI_TOKEN || '';
