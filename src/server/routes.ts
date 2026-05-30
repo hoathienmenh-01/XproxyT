@@ -12,6 +12,7 @@ import {sessionStore} from '../sessionStore';
 import {runStore} from '../runtime/runStore';
 import {lockManager} from '../runtime/locks';
 import {getRuntimeDiagnostics, getSchedulerConfig} from '../runtime/scheduler';
+import {getQueueDiagnostics} from '../modules/rateLimiter';
 import {getAccountsFromProviderConf} from '../runtime/providerRouter';
 import {getNetworkProfiles, upsertNetworkProfile, deleteNetworkProfile, verifyDirectIp} from '../runtime/networkProfiles';
 import {getWorkers, upsertWorker, deleteWorker, verifyWorkerIp} from '../modules/workers';
@@ -454,8 +455,10 @@ export function registerRoutes(router: Router): void {
   // === Runtime ===
   router.get('/api/runtime', async ctx => {
     const diag = getRuntimeDiagnostics();
+    const queueDiag = getQueueDiagnostics();
     ctx.body = {
       ...diag,
+      queue: queueDiag,
       activeRuns: runStore.getActiveRuns().map(r => ({id: r.id, status: r.status, providerId: r.providerId, accountId: r.accountId, providerChatId: r.providerChatId, sessionId: r.sessionId, workerId: r.workerId, startedAt: r.startedAt})),
       workers: getWorkers().map(w => ({id: w.id, providerId: w.providerId, status: w.status, lastVerifiedIp: w.lastVerifiedIp})),
     };
@@ -491,6 +494,39 @@ export function registerRoutes(router: Router): void {
     } catch (err) {
       ctx.body = {isRepo: false, error: err instanceof Error ? err.message : String(err)};
     }
+  });
+
+  // === Real-time Log Stream (SSE) ===
+  router.get('/api/logs/stream', async ctx => {
+    ctx.set('Content-Type', 'text/event-stream');
+    ctx.set('Cache-Control', 'no-cache');
+    ctx.set('Connection', 'keep-alive');
+    ctx.set('X-Accel-Buffering', 'no');
+    ctx.status = 200;
+
+    const stream = new (require('stream').PassThrough)();
+    ctx.body = stream;
+
+    // Send initial ping
+    stream.write(':connected\n\n');
+
+    const unsubscribe = configStore.onLog((entry) => {
+      try {
+        const data = JSON.stringify(entry);
+        stream.write(`data: ${data}\n\n`);
+      } catch {}
+    });
+
+    // Heartbeat every 15s to keep connection alive
+    const heartbeat = setInterval(() => {
+      try { stream.write(':heartbeat\n\n'); } catch {}
+    }, 15000);
+
+    ctx.req.on('close', () => {
+      unsubscribe();
+      clearInterval(heartbeat);
+      stream.end();
+    });
   });
 
   // === Misc ===

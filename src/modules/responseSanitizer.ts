@@ -39,6 +39,8 @@ const REASONING_LEAK_PATTERNS: RegExp[] = [
 export function stripReasoningFromAnswer(content: string): string {
   if (!content) return content;
 
+  const original = content;
+
   // Strip <think>...</think> blocks (Qwen's native thinking output)
   let cleaned = content.replace(/<think>[\s\S]*?<\/think>/g, '');
 
@@ -49,7 +51,13 @@ export function stripReasoningFromAnswer(content: string): string {
   cleaned = cleaned.replace(/<think>[\s\S]*$/g, '');
   cleaned = cleaned.replace(/<thinking>[\s\S]*$/g, '');
 
-  return cleaned.trim();
+  // Only trim if we actually removed reasoning blocks.
+  // This preserves whitespace in normal text chunks (e.g. spaces between words
+  // in streaming mode where each token arrives as a separate chunk).
+  if (cleaned !== original) {
+    return cleaned.trim();
+  }
+  return cleaned;
 }
 
 /**

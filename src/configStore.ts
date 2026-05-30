@@ -52,6 +52,8 @@ export class ConfigStore {
   private filePath: string;
   private data: StoredConfig;
   private useSqlite = false;
+  /** SSE listeners for real-time log streaming */
+  private logListeners: Set<(entry: {level: string; message: string; timestamp: number}) => void> = new Set();
 
   constructor() {
     const dataDir = path.join(process.cwd(), 'data');
@@ -189,6 +191,20 @@ export class ConfigStore {
       ui: {
         language: 'en',
       },
+      proxyMechanisms: {
+        promiseQueue: {
+          enabled: true,
+        },
+        smartRetry: {
+          enabled: true,
+        },
+        sessionSerialize: {
+          enabled: true,
+        },
+        forceNewSession: {
+          enabled: false,
+        },
+      },
     };
 
     this.save(defaultConfig);
@@ -266,6 +282,26 @@ export class ConfigStore {
           ...((this.data.settings?.ui as any) || {}),
           ...((partial.settings.ui as any) || {}),
         },
+        proxyMechanisms: {
+          ...((this.data.settings?.proxyMechanisms as any) || {}),
+          ...((partial.settings.proxyMechanisms as any) || {}),
+          promiseQueue: {
+            ...((this.data.settings?.proxyMechanisms as any)?.promiseQueue || {}),
+            ...((partial.settings.proxyMechanisms as any)?.promiseQueue || {}),
+          },
+          smartRetry: {
+            ...((this.data.settings?.proxyMechanisms as any)?.smartRetry || {}),
+            ...((partial.settings.proxyMechanisms as any)?.smartRetry || {}),
+          },
+          sessionSerialize: {
+            ...((this.data.settings?.proxyMechanisms as any)?.sessionSerialize || {}),
+            ...((partial.settings.proxyMechanisms as any)?.sessionSerialize || {}),
+          },
+          forceNewSession: {
+            ...((this.data.settings?.proxyMechanisms as any)?.forceNewSession || {}),
+            ...((partial.settings.proxyMechanisms as any)?.forceNewSession || {}),
+          },
+        },
       };
       const rest = {...partial};
       delete (rest as any).settings;
@@ -323,10 +359,21 @@ export class ConfigStore {
   }
 
   addLog(level: string, message: string) {
-    this.data.logs.push({ level, message, timestamp: Date.now() });
+    const entry = { level, message, timestamp: Date.now() };
+    this.data.logs.push(entry);
     // keep logs bounded
     if (this.data.logs.length > 1000) this.data.logs.shift();
     this.save();
+    // Notify SSE listeners
+    for (const listener of this.logListeners) {
+      try { listener(entry); } catch {}
+    }
+  }
+
+  /** Register an SSE log listener. Returns unsubscribe function. */
+  onLog(listener: (entry: {level: string; message: string; timestamp: number}) => void): () => void {
+    this.logListeners.add(listener);
+    return () => { this.logListeners.delete(listener); };
   }
 
   getLogs(limit = 200) {

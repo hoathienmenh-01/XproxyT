@@ -53,8 +53,9 @@ import {getToolNames, parseToolCalls, cleanVisibleText} from './main/proxy/toolc
 import {injectToolPrompt, normalizeToolMessages} from './main/proxy/toolcall/toolcall';
 import {shouldUseNonStream, getClaudeCodeConfig} from './modules/claudeCodeMode';
 import {processChunk as bufferProcessChunk, createAccumulatorState, finalize as bufferFinalize, reset as bufferReset} from './modules/bufferedToolAccumulator';
-import {acquireRequest as acquireRateLimit, report429 as reportRateLimit429, getAccountRateState, configureRateLimiter} from './modules/rateLimiter';
+import {acquireRequest as acquireRateLimit, acquireRequestWithQueue, getQueueDiagnostics, report429 as reportRateLimit429, getAccountRateState, configureRateLimiter} from './modules/rateLimiter';
 import {compactMessages, buildCompactedMessages} from './modules/contextCompactor';
+import {executeWithRetry} from './modules/smartRetry';
 import {shouldResetSession, createResetContext, classifyResetReason} from './modules/sessionReset';
 import {createSnapshot, mergeSnapshotWithMessages} from './modules/sessionSnapshot';
 import {acquireFileLock, releaseFileLock, releaseSessionLocks, checkConflict, cleanupExpiredLocks, getWorkspaceDiagnostics, recordFileChange} from './modules/workspaceScheduler';
@@ -1354,20 +1355,52 @@ export class SimpleProxyServer {
         return;
       }
 
-      // Phase 7: Rate limiting — check before making upstream request
+      // Phase 7: Rate limiting — configurable via proxyMechanisms settings
       const rateAccountKey = `${providerId}:${account.id}`;
-      const rateCheck = acquireRateLimit(rateAccountKey);
-      if (!rateCheck.acquired) {
-        ctx.status = 429;
-        ctx.body = { error: { message: rateCheck.result.reason || 'Rate limit exceeded', type: 'rate_limit', retryAfterMs: rateCheck.result.retryAfterMs } };
-        configStore.addLog('error', JSON.stringify({ path: '/v1/chat/completions', status: 429, model, stream: !!body.stream, error: rateCheck.result.reason, durationMs: Date.now() - startedAt }));
-        return;
+      const proxyMechanisms = conf.settings?.proxyMechanisms || {};
+      const usePromiseQueue = proxyMechanisms.promiseQueue?.enabled !== false;
+      
+      let releaseRate: () => void;
+      
+      if (usePromiseQueue) {
+        // Promise Queue mode: queue request when concurrent limit is hit
+        const { promise: ratePromise, cancel: cancelQueue } = acquireRequestWithQueue(rateAccountKey);
+        
+        // Register client disconnect handler BEFORE awaiting queue
+        const onClientClose = () => { cancelQueue(); };
+        ctx.req.once('close', onClientClose);
+        
+        try {
+          releaseRate = await ratePromise;
+        } catch (rateErr: any) {
+          ctx.req.removeListener('close', onClientClose);
+          const rateMsg = rateErr instanceof Error ? rateErr.message : String(rateErr);
+          if (rateMsg.includes('cancelled while in queue')) {
+            appLogger.info('[Server] Request cancelled while in queue (client disconnect)', { data: { model, rateAccountKey } });
+            return;
+          }
+          ctx.status = 429;
+          ctx.body = { error: { message: rateMsg, type: 'rate_limit' } };
+          configStore.addLog('error', JSON.stringify({ path: '/v1/chat/completions', status: 429, model, stream: !!body.stream, error: rateMsg, durationMs: Date.now() - startedAt }));
+          return;
+        }
+        ctx.req.removeListener('close', onClientClose);
+      } else {
+        // Immediate reject mode: reject with 429 if concurrent limit is hit
+        const rateCheck = acquireRateLimit(rateAccountKey);
+        if (!rateCheck.acquired) {
+          ctx.status = 429;
+          ctx.body = { error: { message: rateCheck.result.reason || 'Rate limit exceeded', type: 'rate_limit', retryAfterMs: rateCheck.result.retryAfterMs } };
+          configStore.addLog('error', JSON.stringify({ path: '/v1/chat/completions', status: 429, model, stream: !!body.stream, error: rateCheck.result.reason, durationMs: Date.now() - startedAt }));
+          return;
+        }
+        releaseRate = rateCheck.release;
       }
 
       const token = (account.credentials.token) || process.env.QWEN_AI_TOKEN || '';
       const cookies = (account.credentials.cookies || account.credentials.cookie) || process.env.QWEN_AI_COOKIES || '';
       if (!token && !cookies) {
-        rateCheck.release();
+        releaseRate();
         ctx.status = 400;
         ctx.body = { error: { message: `Token/cookies not configured for account "${account.id}"; set via /api/provider/token or QWEN_AI_TOKEN env` } };
         configStore.addLog('error', JSON.stringify({ path: '/v1/chat/completions', status: ctx.status, model, stream: !!body.stream, prompt: capturedPromptMessages, prompt_preview: promptPreview, prompt_messages: capturedPromptMessages, requestHeaders: {client: clientRequestHeaders}, responseHeaders: {client: getClientResponseHeaders(ctx)}, error: `Token/cookies not configured for account "${account.id}"`, durationMs: Date.now() - startedAt }));
@@ -1393,9 +1426,22 @@ export class SimpleProxyServer {
       let combinedMessages: any[] = messages;
       let inboundHash = '';
 
+      // Force New Session: when enabled, always create a new session (skip context hash reuse)
+      const forceNewSession = proxyMechanisms.forceNewSession?.enabled === true;
+
       if (sessionEnabled && messages.length > 0) {
         inboundHash = computeInboundContextHash(messages, model);
-        if (inboundHash) {
+        if (forceNewSession) {
+          // Force new session: always create fresh, skip hash lookup
+          currentSession = sessionStore.createSession({model, source: 'auto'});
+          if (inboundHash) {
+            await sessionStore.updateContextHash(currentSession.id, undefined, inboundHash);
+          }
+          sessionMode = 'new';
+          sessionResolveReason = `force_new_session${inboundHash ? '_hash=' + inboundHash.slice(0, 8) : ''}`;
+          sessionIdForLog = currentSession.id;
+          sessionStore.setModel(currentSession.id, model);
+        } else if (inboundHash) {
           currentSession = sessionStore.resolveByContextHash(inboundHash) || null;
           if (currentSession) {
             sessionMode = 'persistent';
@@ -1926,10 +1972,80 @@ export class SimpleProxyServer {
         chatCompletionParams.providerSessionId = effectiveProviderSessionId;
         chatCompletionParams.signal = abortController.signal;
 
-        const { response, chatId } = await directAdapter.chatCompletion(chatCompletionParams);
+        // Phase 9: Smart Retry — configurable via proxyMechanisms settings
+        const useSmartRetry = proxyMechanisms.smartRetry?.enabled !== false;
+
+        let retryResult: any;
+        if (useSmartRetry) {
+        retryResult = await executeWithRetry({
+          adapter: directAdapter,
+          model,
+          messages: processedMessages,
+          chatId: effectiveProviderSessionId,
+          sessionId: currentSession?.id,
+          providerId,
+          accountId: account.id,
+          stream,
+          signal: abortController.signal,
+          extraParams: {
+            originalModel: model,
+            files: chatCompletionParams.files,
+            file_ids: chatCompletionParams.file_ids,
+            enable_thinking: chatCompletionParams.enable_thinking,
+            enableThinking: chatCompletionParams.enableThinking,
+            thinking_mode: chatCompletionParams.thinking_mode,
+            thinkingMode: chatCompletionParams.thinkingMode,
+            reasoning_effort: chatCompletionParams.reasoning_effort,
+            reasoning: chatCompletionParams.reasoning,
+            thinking_budget: chatCompletionParams.thinking_budget,
+            enableWebSearch: chatCompletionParams.enableWebSearch,
+          },
+          tracePrefix: `[SmartRetry][${model}]`,
+        });
+
+        } else {
+          // Smart Retry disabled: direct call, no retry
+          retryResult = await (async () => {
+            const chatParams: any = {
+              model,
+              messages: processedMessages,
+              stream,
+              providerSessionId: effectiveProviderSessionId,
+              signal: abortController.signal,
+              originalModel: model,
+              files: chatCompletionParams.files,
+              file_ids: chatCompletionParams.file_ids,
+              enable_thinking: chatCompletionParams.enable_thinking,
+              enableThinking: chatCompletionParams.enableThinking,
+              thinking_mode: chatCompletionParams.thinking_mode,
+              thinkingMode: chatCompletionParams.thinkingMode,
+              reasoning_effort: chatCompletionParams.reasoning_effort,
+              reasoning: chatCompletionParams.reasoning,
+              thinking_budget: chatCompletionParams.thinking_budget,
+              enableWebSearch: chatCompletionParams.enableWebSearch,
+            };
+            const { response, chatId: respChatId } = await directAdapter.chatCompletion(chatParams);
+            return { response, chatId: respChatId || effectiveProviderSessionId || '', retried: false, attempts: 1, sessionReset: false, retryReasons: [], totalDurationMs: 0 };
+          })();
+        }
+
+        const response = retryResult.response;
+        const chatId = retryResult.chatId;
+
+        // If session was reset, update the provider session ID
+        if (retryResult.sessionReset && currentSession && retryResult.oldChatId) {
+          appLogger.info('[Server] Smart retry reset session', {
+            data: {
+              oldChatId: retryResult.oldChatId,
+              newChatId: chatId,
+              attempts: retryResult.attempts,
+              retryReasons: retryResult.retryReasons,
+            },
+          });
+        }
 
         // Phase 7: Release rate limit on successful upstream response
-        rateCheck.release();
+        releaseRate();
 
         // Update provider binding
         if (currentSession && chatId && bindingPurpose !== 'stateless') {
@@ -2025,7 +2141,7 @@ export class SimpleProxyServer {
         await finalizeRun('completed', { providerChatId: chatId });
       } catch (err) {
         // Phase 7: Release rate limit on error
-        rateCheck.release();
+        releaseRate();
 
         // Report 429 if upstream rate limited
         const errText = err instanceof Error ? err.message : String(err);

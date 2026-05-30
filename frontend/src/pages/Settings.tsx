@@ -29,6 +29,10 @@ export default function Settings() {
   const [directIpSource, setDirectIpSource] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [promiseQueueEnabled, setPromiseQueueEnabled] = useState(true);
+  const [smartRetryEnabled, setSmartRetryEnabled] = useState(true);
+  const [sessionSerializeEnabled, setSessionSerializeEnabled] = useState(true);
+  const [forceNewSessionEnabled, setForceNewSessionEnabled] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -67,6 +71,11 @@ export default function Settings() {
       setEgressStrict(ei.strict !== false);
       setEgressFallback(!!ei.fallbackToDirect);
       setEgressVerify(ei.verifyBeforeUse !== false);
+      const pm = data?.settings?.proxyMechanisms || {};
+      setPromiseQueueEnabled(pm.promiseQueue?.enabled !== false);
+      setSmartRetryEnabled(pm.smartRetry?.enabled !== false);
+      setSessionSerializeEnabled(pm.sessionSerialize?.enabled !== false);
+      setForceNewSessionEnabled(!!pm.forceNewSession?.enabled);
     } catch {}
     try {
       const ipRes = await fetch('/api/egress/direct-ip');
@@ -119,6 +128,12 @@ export default function Settings() {
               strict: egressStrict,
               fallbackToDirect: egressFallback,
               verifyBeforeUse: egressVerify,
+            },
+            proxyMechanisms: {
+              promiseQueue: { enabled: promiseQueueEnabled },
+              smartRetry: { enabled: smartRetryEnabled },
+              sessionSerialize: { enabled: sessionSerializeEnabled },
+              forceNewSession: { enabled: forceNewSessionEnabled },
             },
           },
         }),
@@ -350,6 +365,54 @@ export default function Settings() {
             {t('settings.egress.warning')}
           </p>
         )}
+      </div>
+
+      <div className="surface-card">
+        <div className="surface-card-head">
+          <h3>Proxy Mechanisms</h3>
+          <p className="muted" style={{fontSize: '0.85em'}}>Control how the proxy handles requests, retries, and sessions. Hover over each toggle for details.</p>
+        </div>
+        <div className="settings-grid">
+          <label className="toggle-field">
+            <input type="checkbox" checked={promiseQueueEnabled} onChange={(e) => setPromiseQueueEnabled(e.target.checked)} />
+            <span>Promise Queue (Burst Traffic)</span>
+          </label>
+          <p className="field-hint" style={{marginTop: -8, marginBottom: 12, fontSize: '0.85em', color: 'var(--text-4)', paddingLeft: 28}}>
+            {promiseQueueEnabled
+              ? '✅ BẬT: Khi nhiều request đến cùng lúc (burst), proxy sẽ xếp hàng đợi thay vì trả về 429. Request chờ slot trống tối đa 120s trước khi bị reject. Phù hợp khi agent (Cline/Claude Code) tự động bắn 2-3 request cùng lúc.'
+              : '🔴 TẮT: Khi concurrent limit đạt max (3), request mới sẽ bị reject ngay lập tức với HTTP 429. Client phải tự retry.'}
+          </p>
+
+          <label className="toggle-field">
+            <input type="checkbox" checked={smartRetryEnabled} onChange={(e) => setSmartRetryEnabled(e.target.checked)} />
+            <span>Smart Retry (3-Attempt with Session Reset)</span>
+          </label>
+          <p className="field-hint" style={{marginTop: -8, marginBottom: 12, fontSize: '0.85em', color: 'var(--text-4)', paddingLeft: 28}}>
+            {smartRetryEnabled
+              ? '✅ BẬT: Khi Qwen AI trả lỗi, proxy tự động retry 3 lần: Lần 1 gửi bình thường → Lần 2 đợi 1s gửi lại (nếu lỗi mạng) → Lần 3 reset session, tạo Chat ID mới, gửi lại toàn bộ lịch sử. Client không thấy lỗi retry.'
+              : '🔴 TẮT: Nếu Qwen AI trả lỗi, proxy trả lỗi đó ngay về client. Không có retry tự động.'}
+          </p>
+
+          <label className="toggle-field">
+            <input type="checkbox" checked={sessionSerializeEnabled} onChange={(e) => setSessionSerializeEnabled(e.target.checked)} />
+            <span>Session Serialize (Sequential Same-Session)</span>
+          </label>
+          <p className="field-hint" style={{marginTop: -8, marginBottom: 12, fontSize: '0.85em', color: 'var(--text-4)', paddingLeft: 28}}>
+            {sessionSerializeEnabled
+              ? '✅ BẬT: Khi 2 request cùng 1 cuộc hội thoại (cùng session/chat ID), proxy buộc chúng chạy tuần tự — request #2 đợi request #1 xong. Tránh lỗi "chat in progress" từ Qwen.'
+              : '🔴 TẮT: Request cùng session có thể chạy song song, nhưng Qwen có thể trả lỗi "chat in progress" nếu 2 request cùng chat ID đến cùng lúc.'}
+          </p>
+
+          <label className="toggle-field">
+            <input type="checkbox" checked={forceNewSessionEnabled} onChange={(e) => setForceNewSessionEnabled(e.target.checked)} />
+            <span>Force New Session Per Request</span>
+          </label>
+          <p className="field-hint" style={{marginTop: -8, marginBottom: 12, fontSize: '0.85em', color: 'var(--text-4)', paddingLeft: 28}}>
+            {forceNewSessionEnabled
+              ? '✅ BẬT: Mỗi request sẽ tạo 1 cuộc trò chuyện mới hoàn toàn trên Qwen — không reuse session cũ. Mỗi request là 1 Chat ID riêng biệt. Tốn thêm tài nguyên Qwen nhưng đảm bảo cô lập hoàn toàn giữa các request.'
+              : '🔴 TẮT (mặc định): Proxy tự động detect cùng context → reuse session cũ. Khác context → tạo session mới. Hiệu quả hơn vì không tạo chat rác trên Qwen.'}
+          </p>
+        </div>
       </div>
 
       <div className="action-row">
